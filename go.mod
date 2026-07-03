@@ -1,4 +1,4 @@
-module github.com/rhythmwave/ptahforge
+module github.com/rhythmwave/ptahcortex
 
 go 1.26.2
 

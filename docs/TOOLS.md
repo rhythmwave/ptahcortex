@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ptahforge supports multiple tool calling patterns based on dependency analysis. The LLM's tool calls are analyzed for dependencies, then executed optimally.
+Ptahcortex supports multiple tool calling patterns based on dependency analysis. The LLM's tool calls are analyzed for dependencies, then executed optimally.
 
 ## Pattern 1: Parallel Independent Calls
 
@@ -15,7 +15,7 @@ LLM Response:
   - call find_symbol("HandleError")
 ```
 
-Ptahforge executes all three in parallel:
+Ptahcortex executes all three in parallel:
 
 ```go
 // Semaphore-limited parallel execution
@@ -51,7 +51,7 @@ LLM Response:
   - call analyze_code({code: result[1].content}) → get analysis
 ```
 
-Ptahforge detects the dependency chain and executes in order:
+Ptahcortex detects the dependency chain and executes in order:
 
 ```go
 func (e *ToolExecutor) executeSequential(ctx context.Context, calls []ToolCall) []ToolResult {

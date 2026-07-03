@@ -1,4 +1,4 @@
-# Ptahforge — Development Roadmap
+# Ptahcortex — Development Roadmap
 
 ## Timeline: July 3 — August 14, 2026 (6 weeks)
 

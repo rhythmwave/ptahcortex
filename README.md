@@ -1,10 +1,10 @@
-# Ptahforge
+# Ptahcortex
 
 A lightweight Go framework for building production-ready AI agents with MCP (Model Context Protocol) tool calling.
 
 ## Why
 
-Most AI agent frameworks are either too simple (single-turn chat) or too complex (heavy orchestration with lock-in). Ptahforge sits in the middle:
+Most AI agent frameworks are either too simple (single-turn chat) or too complex (heavy orchestration with lock-in). Ptahcortex sits in the middle:
 
 - **MCP-native** — tools come from any MCP server, not hardcoded plugins
 - **Production patterns** — retry, timeout, cost tracking, observability
@@ -15,7 +15,7 @@ Most AI agent frameworks are either too simple (single-turn chat) or too complex
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                  Ptahforge Runtime                │
+│                  Ptahcortex Runtime                │
 │                                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
 │  │ Planner  │  │ Executor │  │  Reflector   │  │
@@ -68,7 +68,7 @@ Tools are not hardcoded. They come from MCP servers:
 - **Web** — fetch, scrape, search
 - **Custom** — any stdio MCP server you write
 
-Ptahforge discovers tools at startup via `tools/list`, then makes them available to the LLM.
+Ptahcortex discovers tools at startup via `tools/list`, then makes them available to the LLM.
 
 ### Tool Orchestration
 
@@ -164,7 +164,7 @@ otel:
 
 ## How It Differs From Existing Tools
 
-| Feature | Ptahforge | LangChain | CrewAI | AutoGen |
+| Feature | Ptahcortex | LangChain | CrewAI | AutoGen |
 |---|---|---|---|---|
 | Language | Go | Python | Python | Python |
 | MCP native | ✅ | ❌ (plugins) | ❌ | ❌ |
@@ -176,11 +176,11 @@ otel:
 
 ## Integration with Existing Projects
 
-Ptahforge reuses and connects your existing work:
+Ptahcortex reuses and connects your existing work:
 
 | Project | Relationship |
 |---|---|
-| **Code Agent Proxy** | LLM backend — Ptahforge calls it for model inference |
+| **Code Agent Proxy** | LLM backend — Ptahcortex calls it for model inference |
 | **Commit Reviewer** | First example agent — code review workflow |
 | **Lexa MCP** | Primary MCP server — code intelligence tools |
 | **OTel Grafana Demo** | Observability — traces flow to Grafana/Tempo |

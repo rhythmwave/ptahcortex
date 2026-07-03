@@ -4,28 +4,28 @@
 
 Model Context Protocol (MCP) is a standard for connecting AI models to external tools and data sources. It uses JSON-RPC 2.0 over stdio.
 
-## How Ptahforge Uses MCP
+## How Ptahcortex Uses MCP
 
-Ptahforge connects to MCP servers as tool providers. The LLM doesn't know about MCP — it just sees tool definitions and calls them. Ptahforge routes tool calls to the correct MCP server.
+Ptahcortex connects to MCP servers as tool providers. The LLM doesn't know about MCP — it just sees tool definitions and calls them. Ptahcortex routes tool calls to the correct MCP server.
 
 ```
 LLM says: "call search_code with query 'error handling'"
     │
     ▼
-Ptahforge routes to Lexa MCP server
+Ptahcortex routes to Lexa MCP server
     │
     ▼
 Lexa returns: [{file: "main.go", line: 42, snippet: "..."}]
     │
     ▼
-Ptahforge formats result back to LLM
+Ptahcortex formats result back to LLM
 ```
 
 ## MCP Protocol Flow
 
 ### 1. Initialize
 ```json
-→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ptahforge","version":"0.1.0"}}}
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ptahcortex","version":"0.1.0"}}}
 ← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"lexa","version":"0.6.1"}}}
 ```
 
@@ -182,7 +182,7 @@ MCP tools use JSON Schema for input validation:
 }
 ```
 
-Ptahforge validates tool arguments against this schema before calling the MCP server.
+Ptahcortex validates tool arguments against this schema before calling the MCP server.
 
 ## Error Handling
 
@@ -199,4 +199,4 @@ MCP tool errors are returned as:
 }
 ```
 
-Ptahforge treats `isError: true` results as tool errors and reports them to the LLM so it can adjust its approach.
+Ptahcortex treats `isError: true` results as tool errors and reports them to the LLM so it can adjust its approach.
