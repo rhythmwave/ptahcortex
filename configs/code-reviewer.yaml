@@ -22,7 +22,7 @@ llm:
 mcp_servers:
   - name: lexa
     command: /home/deploy/.local/bin/lexa
-    args: []
+    args: ["mcp"]
     cwd: /home/deploy/commit-reviewer-src
 
 tools:
