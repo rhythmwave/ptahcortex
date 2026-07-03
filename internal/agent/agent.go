@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
-	"github.com/rhythmwave/agentkit/internal/config"
-	"github.com/rhythmwave/agentkit/internal/llm"
-	"github.com/rhythmwave/agentkit/internal/mcp"
+	"github.com/rhythmwave/ptahforge/internal/config"
+	"github.com/rhythmwave/ptahforge/internal/llm"
+	"github.com/rhythmwave/ptahforge/internal/mcp"
 )
 
 // Agent runs the plan→execute→reflect loop.

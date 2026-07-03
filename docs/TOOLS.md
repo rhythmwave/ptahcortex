@@ -2,7 +2,7 @@
 
 ## Overview
 
-AgentKit supports multiple tool calling patterns based on dependency analysis. The LLM's tool calls are analyzed for dependencies, then executed optimally.
+Ptahforge supports multiple tool calling patterns based on dependency analysis. The LLM's tool calls are analyzed for dependencies, then executed optimally.
 
 ## Pattern 1: Parallel Independent Calls
 
@@ -15,7 +15,7 @@ LLM Response:
   - call find_symbol("HandleError")
 ```
 
-AgentKit executes all three in parallel:
+Ptahforge executes all three in parallel:
 
 ```go
 // Semaphore-limited parallel execution
@@ -51,7 +51,7 @@ LLM Response:
   - call analyze_code({code: result[1].content}) → get analysis
 ```
 
-AgentKit detects the dependency chain and executes in order:
+Ptahforge detects the dependency chain and executes in order:
 
 ```go
 func (e *ToolExecutor) executeSequential(ctx context.Context, calls []ToolCall) []ToolResult {

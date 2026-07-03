@@ -143,7 +143,7 @@ func (c *Client) initialize() error {
 	resp, err := c.request("initialize", map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "agentkit", "version": "0.1.0"},
+		"clientInfo":      map[string]any{"name": "ptahforge", "version": "0.1.0"},
 	})
 	if err != nil {
 		return err

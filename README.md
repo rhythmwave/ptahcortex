@@ -1,10 +1,10 @@
-# AgentKit
+# Ptahforge
 
 A lightweight Go framework for building production-ready AI agents with MCP (Model Context Protocol) tool calling.
 
 ## Why
 
-Most AI agent frameworks are either too simple (single-turn chat) or too complex (heavy orchestration with lock-in). AgentKit sits in the middle:
+Most AI agent frameworks are either too simple (single-turn chat) or too complex (heavy orchestration with lock-in). Ptahforge sits in the middle:
 
 - **MCP-native** — tools come from any MCP server, not hardcoded plugins
 - **Production patterns** — retry, timeout, cost tracking, observability
@@ -15,7 +15,7 @@ Most AI agent frameworks are either too simple (single-turn chat) or too complex
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                  AgentKit Runtime                │
+│                  Ptahforge Runtime                │
 │                                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
 │  │ Planner  │  │ Executor │  │  Reflector   │  │
@@ -68,7 +68,7 @@ Tools are not hardcoded. They come from MCP servers:
 - **Web** — fetch, scrape, search
 - **Custom** — any stdio MCP server you write
 
-AgentKit discovers tools at startup via `tools/list`, then makes them available to the LLM.
+Ptahforge discovers tools at startup via `tools/list`, then makes them available to the LLM.
 
 ### Tool Orchestration
 
@@ -164,7 +164,7 @@ otel:
 
 ## How It Differs From Existing Tools
 
-| Feature | AgentKit | LangChain | CrewAI | AutoGen |
+| Feature | Ptahforge | LangChain | CrewAI | AutoGen |
 |---|---|---|---|---|
 | Language | Go | Python | Python | Python |
 | MCP native | ✅ | ❌ (plugins) | ❌ | ❌ |
@@ -176,11 +176,11 @@ otel:
 
 ## Integration with Existing Projects
 
-AgentKit reuses and connects your existing work:
+Ptahforge reuses and connects your existing work:
 
 | Project | Relationship |
 |---|---|
-| **Code Agent Proxy** | LLM backend — AgentKit calls it for model inference |
+| **Code Agent Proxy** | LLM backend — Ptahforge calls it for model inference |
 | **Commit Reviewer** | First example agent — code review workflow |
 | **Lexa MCP** | Primary MCP server — code intelligence tools |
 | **OTel Grafana Demo** | Observability — traces flow to Grafana/Tempo |

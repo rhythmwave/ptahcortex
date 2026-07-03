@@ -1,4 +1,4 @@
-module github.com/rhythmwave/agentkit
+module github.com/rhythmwave/ptahforge
 
 go 1.26.2
 

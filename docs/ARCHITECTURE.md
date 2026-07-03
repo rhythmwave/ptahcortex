@@ -2,7 +2,7 @@
 
 ## Overview
 
-AgentKit is a Go framework for building AI agents that use MCP (Model Context Protocol) for tool calling. The core design principles:
+Ptahforge is a Go framework for building AI agents that use MCP (Model Context Protocol) for tool calling. The core design principles:
 
 1. **Separation of concerns** — Agent logic, tool execution, LLM communication, and observability are independent layers
 2. **Config-driven** — Agents are defined in YAML, not code
@@ -13,7 +13,7 @@ AgentKit is a Go framework for building AI agents that use MCP (Model Context Pr
 
 ### 1. Agent Loop
 
-The agent loop is the heart of AgentKit. Each iteration follows:
+The agent loop is the heart of Ptahforge. Each iteration follows:
 
 ```
 ┌─────────┐     ┌──────────┐     ┌───────────┐
@@ -130,11 +130,11 @@ Every component emits telemetry:
 - `llm.chat` — LLM API call
 
 **Metrics:**
-- `agentkit_iterations_total` — counter by agent/status
-- `agentkit_tool_calls_total` — counter by tool/status
-- `agentkit_llm_tokens_total` — counter by direction (input/output)
-- `agentkit_llm_latency_seconds` — histogram
-- `agentkit_tool_latency_seconds` — histogram by tool
+- `ptahforge_iterations_total` — counter by agent/status
+- `ptahforge_tool_calls_total` — counter by tool/status
+- `ptahforge_llm_tokens_total` — counter by direction (input/output)
+- `ptahforge_llm_latency_seconds` — histogram
+- `ptahforge_tool_latency_seconds` — histogram by tool
 
 **Logs:**
 - Structured JSON with trace correlation
@@ -229,7 +229,7 @@ servers:
 
 ## Error Handling
 
-AgentKit handles errors at multiple levels:
+Ptahforge handles errors at multiple levels:
 
 1. **Tool errors** — retry, then report to LLM as tool error result
 2. **LLM errors** — retry with backoff, fallback to alternative provider

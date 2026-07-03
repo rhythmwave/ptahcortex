@@ -4,28 +4,28 @@
 
 Model Context Protocol (MCP) is a standard for connecting AI models to external tools and data sources. It uses JSON-RPC 2.0 over stdio.
 
-## How AgentKit Uses MCP
+## How Ptahforge Uses MCP
 
-AgentKit connects to MCP servers as tool providers. The LLM doesn't know about MCP — it just sees tool definitions and calls them. AgentKit routes tool calls to the correct MCP server.
+Ptahforge connects to MCP servers as tool providers. The LLM doesn't know about MCP — it just sees tool definitions and calls them. Ptahforge routes tool calls to the correct MCP server.
 
 ```
 LLM says: "call search_code with query 'error handling'"
     │
     ▼
-AgentKit routes to Lexa MCP server
+Ptahforge routes to Lexa MCP server
     │
     ▼
 Lexa returns: [{file: "main.go", line: 42, snippet: "..."}]
     │
     ▼
-AgentKit formats result back to LLM
+Ptahforge formats result back to LLM
 ```
 
 ## MCP Protocol Flow
 
 ### 1. Initialize
 ```json
-→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"agentkit","version":"0.1.0"}}}
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ptahforge","version":"0.1.0"}}}
 ← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"lexa","version":"0.6.1"}}}
 ```
 
@@ -182,7 +182,7 @@ MCP tools use JSON Schema for input validation:
 }
 ```
 
-AgentKit validates tool arguments against this schema before calling the MCP server.
+Ptahforge validates tool arguments against this schema before calling the MCP server.
 
 ## Error Handling
 
@@ -199,4 +199,4 @@ MCP tool errors are returned as:
 }
 ```
 
-AgentKit treats `isError: true` results as tool errors and reports them to the LLM so it can adjust its approach.
+Ptahforge treats `isError: true` results as tool errors and reports them to the LLM so it can adjust its approach.
