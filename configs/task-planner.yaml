@@ -1,0 +1,32 @@
+# Task Planner Agent
+# Decomposes complex tasks into steps and executes them
+
+name: task-planner
+description: >
+  You are a task planning agent. When given a complex task:
+  1. Break it into smaller, concrete steps
+  2. Execute each step using available tools
+  3. Reflect on results after each step
+  4. Adjust your plan if something fails
+  
+  Think step by step. Show your reasoning.
+
+llm:
+  provider: openai
+  model: gpt-4o
+  base_url: http://localhost:8080/v1
+  max_tokens: 4096
+
+mcp_servers:
+  - name: lexa
+    command: /home/deploy/.local/bin/lexa
+    args: []
+    cwd: /home/deploy/commit-reviewer-src
+
+tools:
+  max_parallel: 3
+  timeout: 30s
+
+agent:
+  max_iterations: 8
+  max_tokens_per_run: 80000

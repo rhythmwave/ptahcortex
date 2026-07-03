@@ -1,0 +1,32 @@
+# Document Q&A Agent
+# Answers questions about a codebase using file tools
+
+name: doc-qa
+description: >
+  You are a codebase expert. Answer questions about the project by:
+  - Searching for relevant files
+  - Reading source code and documentation
+  - Finding references and usage patterns
+  
+  Always cite specific files and line numbers in your answers.
+  If you're not sure, search more before guessing.
+
+llm:
+  provider: openai
+  model: gpt-4o
+  base_url: http://localhost:8080/v1
+  max_tokens: 4096
+
+mcp_servers:
+  - name: filesystem
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    cwd: .
+
+tools:
+  max_parallel: 3
+  timeout: 15s
+
+agent:
+  max_iterations: 3
+  max_tokens_per_run: 30000
