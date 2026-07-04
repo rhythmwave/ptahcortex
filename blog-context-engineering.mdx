@@ -1,0 +1,206 @@
+---
+title: "Context Engineering for AI Agents: Why Your Agent Wastes 70% of Its Tokens"
+author: Bayu Dian Nugroho
+date: 2026-07-04
+tags: [ai, agents, context-engineering, go, mcp, llm]
+description: "Most AI agents dump everything into one LLM call. Here's how call-aware context assembly cuts token usage by 72%."
+---
+
+# Context Engineering for AI Agents: Why Your Agent Wastes 70% of Its Tokens
+
+Most AI agents have a dirty secret: they're burning tokens on context the model doesn't need.
+
+Every iteration, they dump the full conversation history — every tool result, every intermediate thought, every failed attempt — into a single LLM call. The context grows quadratically. By iteration 20, you're paying for 25x more tokens than iteration 1.
+
+This isn't a prompt writing problem. It's a **context engineering** problem.
+
+## The Problem: Context Goes In, Nothing Comes Out
+
+Here's what a typical agent loop looks like:
+
+```
+Iteration 1: 1K tokens  (task + first tool result)
+Iteration 2: 4K tokens  (task + both tool results)
+Iteration 3: 9K tokens  (task + all three tool results)
+...
+Iteration 20: 400K tokens (task + everything ever)
+```
+
+The agent sends **all of it** to the LLM every single time. The model doesn't need all of it. But nobody told the agent that.
+
+### Why Current "Fixes" Don't Work
+
+| Approach | What It Does | Why It Fails |
+|----------|-------------|--------------|
+| Sliding window | Keep last N messages | Drops relevant old context |
+| Summarization | LLM summarizes old messages | Costs tokens to save tokens, lossy |
+| Truncation | Cut messages at N chars | Loses important information randomly |
+| RAG | Retrieve relevant past messages | Retrieval ≠ selection, still noisy |
+| New session | Reset everything | Agent forgets what it learned |
+
+All of these treat the symptom. The root cause is that **all context goes into one LLM call**.
+
+## The Solution: Call-Aware Context Assembly
+
+Not all LLM calls need the same context. A planning call doesn't need raw tool results. A tool evaluation call doesn't need history from three iterations ago.
+
+Instead of one context blob, assemble different context for different call types:
+
+```
+Planning Call:       Task + Previous Summaries (no raw results)
+Tool Selection Call: Sub-task + Tool Descriptions (no history)
+Tool Eval Call:      Sub-task + Tool Result (no other iterations)
+Reflection Call:     Task + Current State (no full history)
+Final Answer Call:   Task + All Relevant Summaries
+```
+
+Each call type has its own "context recipe." The LLM gets exactly what it needs — nothing more, nothing less.
+
+## The Architecture: Sandboxed Tool Reasoning
+
+The key insight: **separate high-level reasoning from tool-level reasoning**.
+
+```
+┌──────────────────────────────────────────────┐
+│            Main Agent Loop                    │
+│         (rich context, expensive)             │
+│                                              │
+│  Plan → [Sandbox] → Collect → Reflect → Final│
+│           ↓    ↑                             │
+│  ┌────────┴────┴────────┐                    │
+│  │    Tool Sandbox       │                    │
+│  │  (isolated, cheap)    │                    │
+│  │                      │                    │
+│  │  Select → Call → Eval │                    │
+│  └──────────────────────┘                    │
+└──────────────────────────────────────────────┘
+```
+
+**Main Loop** (expensive, full context):
+- Receives user task
+- Plans what to accomplish
+- Gets sandbox summaries back
+- Reflects on progress
+- Produces final answer
+
+**Tool Sandbox** (cheap, isolated):
+- Gets a sub-task from main loop
+- Has its own minimal context: just the sub-task + tools
+- Selects tool → calls it → evaluates result
+- Returns a **summary** to main loop (not raw output)
+
+The main loop never sees raw tool output. It only sees summaries.
+
+## The Token Math
+
+Let's compare a 20-iteration agent with 3 tool calls per iteration:
+
+### Without Call-Aware Assembly
+
+```
+Total tokens = sum(1,700 + 3,000 × i) for i in 1..20
+             ≈ 650,000 tokens
+```
+
+### With Call-Aware Assembly (Sandboxed)
+
+```
+Main calls:    20 × 2,200  =  44,000 tokens
+Sandbox calls: 60 × 1,100  =  66,000 tokens
+Reflect calls: 20 × 3,200  =  64,000 tokens
+Final call:     1 × 5,700  =   5,700 tokens
+Total:                        ≈ 180,000 tokens
+```
+
+**Savings: ~72%.** And the savings grow with more iterations.
+
+## Context Tiers
+
+Not all context is equal. We define five tiers:
+
+| Tier | Content | When Included |
+|------|---------|---------------|
+| T0 | System prompt + tool definitions | Always |
+| T1 | Original user task | Always |
+| T2 | Current iteration's tool results | When evaluating current work |
+| T3 | Previous iterations' summaries | Only for reflection/final |
+| T4 | Full raw history | Never (replaced by summaries) |
+
+Current agents send T0 + T1 + T2 + T3 + T4 on every call. We send different tiers per call type.
+
+## How It Differs From Existing Approaches
+
+| Framework | Approach | Gap |
+|-----------|----------|-----|
+| LangChain | Full state across nodes | No context filtering per call |
+| CrewAI | Multi-agent delegation | Each agent has full context |
+| AutoGen | Agent conversations | Message passing, not selection |
+| OpenAI Agents SDK | Tool calling + memory | No context engineering layer |
+
+None of them do **call-aware context assembly**. They optimize at the edges (trimming, compression) but don't have a context manager that decides what goes into each LLM call based on its purpose.
+
+## The Context Engineering Stack
+
+Context engineering isn't one thing. It's a stack:
+
+```
+┌─────────────────────────────────┐
+│  Context Selection (per call)   │ ← What we're building
+├─────────────────────────────────┤
+│  Context Compression            │ ← Summarization, truncation
+├─────────────────────────────────┤
+│  Context Storage                │ ← Memory, knowledge bases
+├─────────────────────────────────┤
+│  Context Retrieval              │ ← RAG, semantic search
+└─────────────────────────────────┘
+```
+
+Most frameworks work on layers 2-4. We're building layer 1: **the decision layer** that decides what context each LLM call actually needs.
+
+## Implementation: Ptahcortex
+
+We're building this as [Ptahcortex](https://github.com/rhythmwave/ptahcortex), an open-source AI agent runtime in Go with native MCP tool calling.
+
+The context manager is a first-class component:
+
+```go
+type CallType int
+
+const (
+    CallPlan      CallType = iota // T0 + T1 + T3
+    CallSelect                    // T0 + sub-task
+    CallEval                      // Sub-task + tool result
+    CallReflect                   // T0 + T1 + T2
+    CallFinal                     // T0 + T1 + all summaries
+)
+
+type ContextManager struct {
+    Assemble(messages []Message, callType CallType) []Message
+}
+```
+
+Each call type assembles a different message set. No truncation needed — we just don't include irrelevant messages.
+
+## Key Takeaways
+
+1. **Context engineering is not prompt engineering.** It's about assembling the right context for each LLM call, not writing better prompts.
+
+2. **Not all LLM calls need the same context.** Planning, tool selection, evaluation, and final answer all have different context needs.
+
+3. **Tool reasoning should be sandboxed.** Isolate tool calls into cheap, minimal-context LLM calls. Only flow summaries back to the main loop.
+
+4. **The math is clear.** Call-aware assembly saves ~72% of tokens at scale. This is a real production concern.
+
+5. **No major framework does this yet.** The gap is real, and it's an opportunity for better agent infrastructure.
+
+## What's Next
+
+We're implementing the context manager in Ptahcortex and benchmarking it against non-sandboxed baselines. If you're interested in context engineering for agents, follow along:
+
+- **Repo:** [github.com/rhythmwave/ptahcortex](https://github.com/rhythmwave/ptahcortex)
+- **Design:** [docs/CONTEXT-MANAGER.md](https://github.com/rhythmwave/ptahcortex/blob/main/docs/CONTEXT-MANAGER.md)
+- **Landscape:** [docs/CONTEXT-ENGINEERING.md](https://github.com/rhythmwave/ptahcortex/blob/main/docs/CONTEXT-ENGINEERING.md)
+
+---
+
+*Bayu Dian Nugroho is a Senior Backend Engineer building AI platform infrastructure. He's the author of Ptahcortex, an open-source AI agent runtime with call-aware context assembly.*
