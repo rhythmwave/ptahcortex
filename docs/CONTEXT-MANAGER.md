@@ -206,11 +206,11 @@ Total: ~180,000 tokens
 ## Implementation Plan
 
 ### Phase 1: Context Manager (Current Sprint)
-- [ ] Define CallType enum (plan, sandbox_select, sandbox_eval, reflect, final)
-- [ ] Implement message assembler per call type
-- [ ] Add sandbox executor (isolated LLM call with minimal context)
-- [ ] Summary extraction from sandbox results
-- [ ] Wire into agent loop
+- [x] Define CallType enum (plan, sandbox_select, sandbox_eval, reflect, final)
+- [x] Implement message assembler per call type
+- [x] Add sandbox executor (isolated LLM call with minimal context)
+- [x] Summary extraction from sandbox results
+- [x] Wire into agent loop
 
 ### Phase 2: Token Tracking
 - [ ] Track tokens per call type
