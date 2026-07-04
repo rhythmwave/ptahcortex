@@ -5,22 +5,49 @@ import (
 	"fmt"
 	"log"
 	"strings"
-
-	"github.com/rhythmwave/ptahcortex/internal/llm"
-	"github.com/rhythmwave/ptahcortex/internal/mcp"
+	"time"
 )
 
 // Sandbox executes tool calls in isolated, cheap LLM calls with minimal context.
 // Only summaries flow back to the main agent loop.
 type Sandbox struct {
-	provider   llm.Provider
+	provider   SandboxLLMProvider
 	assembler  *Assembler
-	manager    *mcp.Manager
+	manager    ToolCaller
 	maxIter    int // max tool iterations per sandbox call
+	tracer     Tracer
 }
 
-// NewSandbox creates a sandbox with the given LLM provider and MCP manager.
-func NewSandbox(provider llm.Provider, assembler *Assembler, manager *mcp.Manager, maxIter int) *Sandbox {
+// SandboxLLMProvider is the interface for sandbox LLM calls.
+type SandboxLLMProvider interface {
+	Chat(req SandboxChatRequest) (*SandboxChatResponse, error)
+	Name() string
+}
+
+// SandboxChatRequest is a request to the LLM for sandbox operations.
+type SandboxChatRequest struct {
+	Messages  []Message
+	Tools     []ToolDef
+	MaxTokens int
+	Model     string
+}
+
+// SandboxChatResponse is the LLM response for sandbox operations.
+type SandboxChatResponse struct {
+	Content   string
+	ToolCalls []ToolCall
+	Usage     TokenUsage
+}
+
+// TokenUsage tracks token consumption.
+type TokenUsage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
+// NewSandbox creates a sandbox with the given LLM provider and tool caller.
+func NewSandbox(provider SandboxLLMProvider, assembler *Assembler, manager ToolCaller, maxIter int) *Sandbox {
 	if maxIter <= 0 {
 		maxIter = 3
 	}
@@ -32,29 +59,61 @@ func NewSandbox(provider llm.Provider, assembler *Assembler, manager *mcp.Manage
 	}
 }
 
+// SetTracer sets the tracer for sandbox operations.
+func (s *Sandbox) SetTracer(tracer Tracer) {
+	s.tracer = tracer
+}
+
 // ExecuteSubTask runs a sub-task in isolation: select tool → call → evaluate → summarize.
 // Returns a SandboxResult with the summary.
-func (s *Sandbox) ExecuteSubTask(subTask string, toolDefs []llm.ToolDefinition) (*SandboxResult, error) {
+func (s *Sandbox) ExecuteSubTask(subTask string, toolDefs []ToolDef) (*SandboxResult, error) {
+	start := time.Now()
 	log.Printf("[sandbox] executing sub-task: %s", truncate(subTask, 80))
 
 	// Step 1: Select tool (minimal context)
+	selectStart := time.Now()
 	selectMsgs := s.assembler.AssembleSandboxSelect(subTask, toolDefs)
-	selectResp, err := s.provider.Chat(llm.ChatRequest{
-		Messages:  selectMsgs,
+
+	// Convert to provider format
+	providerMsgs := make([]Message, len(selectMsgs))
+	copy(providerMsgs, selectMsgs)
+
+	selectResp, err := s.provider.Chat(SandboxChatRequest{
+		Messages:  providerMsgs,
 		Tools:     toolDefs,
 		MaxTokens: 500,
 	})
+	selectDuration := time.Since(selectStart)
+
 	if err != nil {
 		return nil, fmt.Errorf("sandbox select: %w", err)
 	}
 
+	attrs := map[string]any{
+		"sub_task":        truncate(subTask, 100),
+		"select_tokens":   selectResp.Usage.TotalTokens,
+		"select_duration": selectDuration.String(),
+		"tool_calls":      len(selectResp.ToolCalls),
+	}
+	if s.tracer != nil {
+		span := s.tracer.Start("sandbox.select", attrs)
+		span.End()
+	}
+
+	log.Printf("[sandbox] select: %d tokens, %d tool calls, took %v",
+		selectResp.Usage.TotalTokens, len(selectResp.ToolCalls), selectDuration)
+
 	if len(selectResp.ToolCalls) == 0 {
 		// No tool call — LLM answered directly
-		return &SandboxResult{
+		totalDuration := time.Since(start)
+		result := &SandboxResult{
 			SubTask:    subTask,
 			Summary:    selectResp.Content,
 			TokensUsed: selectResp.Usage.TotalTokens,
-		}, nil
+		}
+
+		log.Printf("[sandbox] direct answer: %d tokens, took %v", result.TokensUsed, totalDuration)
+		return result, nil
 	}
 
 	// Step 2: Execute the selected tool(s)
@@ -72,11 +131,22 @@ func (s *Sandbox) ExecuteSubTask(subTask string, toolDefs []llm.ToolDefinition) 
 		var args map[string]any
 		json.Unmarshal([]byte(tc.Function.Arguments), &args)
 
-		// Execute via MCP manager directly
+		// Execute via tool caller
+		toolStart := time.Now()
 		result, err := s.manager.CallTool(toolName, args)
+		toolDuration := time.Since(toolStart)
+
 		if err != nil {
 			log.Printf("[sandbox] tool error: %v", err)
 			allSummaries = append(allSummaries, fmt.Sprintf("%s: Error: %v", toolName, err))
+
+			if s.tracer != nil {
+				s.tracer.Start("sandbox.tool_error", map[string]any{
+					"tool":     toolName,
+					"error":    err.Error(),
+					"duration": toolDuration.String(),
+				}).End()
+			}
 			continue
 		}
 
@@ -85,12 +155,27 @@ func (s *Sandbox) ExecuteSubTask(subTask string, toolDefs []llm.ToolDefinition) 
 			rawResult = "Error: tool returned error"
 		}
 
+		if s.tracer != nil {
+			s.tracer.Start("sandbox.tool_call", map[string]any{
+				"tool":        toolName,
+				"result_size": len(rawResult),
+				"duration":    toolDuration.String(),
+				"is_error":    result.IsError,
+			}).End()
+		}
+
 		// Step 3: Evaluate result (minimal context)
+		evalStart := time.Now()
 		evalMsgs := s.assembler.AssembleSandboxEval(subTask, rawResult)
-		evalResp, err := s.provider.Chat(llm.ChatRequest{
-			Messages: evalMsgs,
+		providerEvalMsgs := make([]Message, len(evalMsgs))
+		copy(providerEvalMsgs, evalMsgs)
+
+		evalResp, err := s.provider.Chat(SandboxChatRequest{
+			Messages: providerEvalMsgs,
 			MaxTokens: 300,
 		})
+		evalDuration := time.Since(evalStart)
+
 		if err != nil {
 			log.Printf("[sandbox] eval error: %v, using raw", err)
 			allSummaries = append(allSummaries, fmt.Sprintf("%s: %s", toolName, truncate(rawResult, 200)))
@@ -98,6 +183,15 @@ func (s *Sandbox) ExecuteSubTask(subTask string, toolDefs []llm.ToolDefinition) 
 		}
 
 		totalTokens += evalResp.Usage.TotalTokens
+
+		if s.tracer != nil {
+			s.tracer.Start("sandbox.eval", map[string]any{
+				"tool":         toolName,
+				"eval_tokens":  evalResp.Usage.TotalTokens,
+				"eval_duration": evalDuration.String(),
+			}).End()
+		}
+
 		summary := evalResp.Content
 		if summary == "" {
 			summary = truncate(rawResult, 200)
@@ -106,7 +200,22 @@ func (s *Sandbox) ExecuteSubTask(subTask string, toolDefs []llm.ToolDefinition) 
 	}
 
 	combinedSummary := strings.Join(allSummaries, "\n")
-	log.Printf("[sandbox] sub-task complete: %d tokens, summary: %d chars", totalTokens, len(combinedSummary))
+	totalDuration := time.Since(start)
+
+	attrs = map[string]any{
+		"sub_task":      truncate(subTask, 100),
+		"total_tokens":  totalTokens,
+		"summary_len":   len(combinedSummary),
+		"tools_called":  len(selectResp.ToolCalls),
+		"total_time":    totalDuration.String(),
+	}
+	if s.tracer != nil {
+		span := s.tracer.Start("sandbox.complete", attrs)
+		span.End()
+	}
+
+	log.Printf("[sandbox] sub-task complete: %d tokens, summary: %d chars, took %v",
+		totalTokens, len(combinedSummary), totalDuration)
 
 	return &SandboxResult{
 		SubTask:    subTask,
@@ -115,12 +224,11 @@ func (s *Sandbox) ExecuteSubTask(subTask string, toolDefs []llm.ToolDefinition) 
 	}, nil
 }
 
-// ExecuteSubTasks runs multiple sub-tasks in parallel.
+// ExecuteSubTasks runs multiple sub-tasks sequentially.
 // Returns results in the same order as input.
-func (s *Sandbox) ExecuteSubTasks(subTasks []string, toolDefs []llm.ToolDefinition) []*SandboxResult {
+func (s *Sandbox) ExecuteSubTasks(subTasks []string, toolDefs []ToolDef) []*SandboxResult {
 	results := make([]*SandboxResult, len(subTasks))
 
-	// Run sequentially for now (parallel requires goroutines + sync)
 	for i, st := range subTasks {
 		result, err := s.ExecuteSubTask(st, toolDefs)
 		if err != nil {

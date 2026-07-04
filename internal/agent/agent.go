@@ -15,13 +15,100 @@ import (
 	"github.com/rhythmwave/ptahcortex/internal/tools"
 )
 
+// llmAdapter wraps the llm.Provider to implement ctx.SandboxLLMProvider.
+type llmAdapter struct {
+	provider llm.Provider
+}
+
+func (a *llmAdapter) Chat(req ctx.SandboxChatRequest) (*ctx.SandboxChatResponse, error) {
+	// Convert context.Message to llm.Message
+	var messages []llm.Message
+	for _, m := range req.Messages {
+		messages = append(messages, llm.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		})
+	}
+
+	// Convert context.ToolDef to llm.ToolDefinition
+	var tools []llm.ToolDefinition
+	for _, t := range req.Tools {
+		tools = append(tools, llm.ToolDefinition{
+			Type: t.Type,
+			Function: llm.ToolFunction{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  t.Function.Parameters,
+			},
+		})
+	}
+
+	resp, err := a.provider.Chat(llm.ChatRequest{
+		Messages:  messages,
+		Tools:     tools,
+		MaxTokens: req.MaxTokens,
+		Model:     req.Model,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert response
+	var toolCalls []ctx.ToolCall
+	for _, tc := range resp.ToolCalls {
+		toolCalls = append(toolCalls, ctx.ToolCall{
+			ID:   tc.ID,
+			Type: tc.Type,
+			Function: struct {
+				Name      string
+				Arguments string
+			}{
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			},
+		})
+	}
+
+	return &ctx.SandboxChatResponse{
+		Content:   resp.Content,
+		ToolCalls: toolCalls,
+		Usage: ctx.TokenUsage{
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+			TotalTokens:      resp.Usage.TotalTokens,
+		},
+	}, nil
+}
+
+func (a *llmAdapter) Name() string {
+	return a.provider.Name()
+}
+
+// mcpAdapter wraps mcp.Manager to implement ctx.ToolCaller.
+type mcpAdapter struct {
+	manager *mcp.Manager
+}
+
+func (a *mcpAdapter) CallTool(name string, arguments map[string]any) (*ctx.ToolResult, error) {
+	result, err := a.manager.CallTool(name, arguments)
+	if err != nil {
+		return nil, err
+	}
+	return &ctx.ToolResult{
+		CallID:  result.CallID,
+		Content: result.Content,
+		IsError: result.IsError,
+	}, nil
+}
+
 // Agent runs the plan→execute→reflect loop with sandboxed tool reasoning.
 type Agent struct {
 	cfg       *config.Config
 	llm       llm.Provider
 	mcp       *mcp.Manager
 	executor  *tools.Executor
-	toolDefs  []llm.ToolDefinition
+	toolDefs  []ctx.ToolDef
 	tracer    *otel.Tracer
 	metrics   *otel.Metrics
 	ctxMgr    *ctx.Manager
@@ -37,21 +124,30 @@ func New(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Manager) *Ag
 	}
 
 	executor := tools.NewExecutor(mcpManager, cfg.Tools.MaxParallel, timeout, tools.DefaultRetry())
+	tracer := otel.NewTracer(true, cfg.Name)
+
+	// Create adapters for context manager
+	llmAdapt := &llmAdapter{provider: provider}
+	mcpAdapt := &mcpAdapter{manager: mcpManager}
 
 	a := &Agent{
 		cfg:      cfg,
 		llm:      provider,
 		mcp:      mcpManager,
 		executor: executor,
-		tracer:   otel.NewTracer(true, cfg.Name),
+		tracer:   tracer,
 		metrics:  otel.NewMetrics(true),
-		ctxMgr:   ctx.NewManager(provider, mcpManager),
+		ctxMgr:   ctx.NewManager(llmAdapt, mcpAdapt),
 	}
 
+	// Wire tracer to context manager
+	a.ctxMgr.SetTracer(ctx.NewLogTracer())
+
+	// Convert MCP tools to context tool definitions
 	for _, t := range mcpManager.AllTools() {
-		a.toolDefs = append(a.toolDefs, llm.ToolDefinition{
+		a.toolDefs = append(a.toolDefs, ctx.ToolDef{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: ctx.ToolFunction{
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.InputSchema,
@@ -64,6 +160,7 @@ func New(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Manager) *Ag
 
 // Run executes the agent loop on a task and returns the final response.
 func (a *Agent) Run(task string) (string, error) {
+	runStart := time.Now()
 	runSpan := a.tracer.Start(nil, "agent.run", map[string]any{
 		"agent": a.cfg.Name,
 		"task":  task,
@@ -74,24 +171,40 @@ func (a *Agent) Run(task string) (string, error) {
 	systemPrompt := a.systemPrompt()
 
 	for iter := 0; iter < a.cfg.Agent.MaxIterations; iter++ {
+		iterStart := time.Now()
 		iterSpan := a.tracer.Start(nil, "agent.iteration", map[string]any{
 			"iteration": iter + 1,
 		})
-		iterStart := time.Now()
 
-		log.Printf("[agent] === iteration %d/%d ===", iter+1, a.cfg.Agent.MaxIterations)
+		log.Printf("\n[agent] ═══════════════════════════════════════")
+		log.Printf("[agent] ║ ITERATION %d/%d", iter+1, a.cfg.Agent.MaxIterations)
+		log.Printf("[agent] ═══════════════════════════════════════")
 
 		// ── PLAN ──
-		// Build plan context: T0 + T1 + T3 (summaries from previous iterations)
+		planStart := time.Now()
 		planMsgs := a.ctxMgr.BuildPlanContext(systemPrompt, task, a.toolDefs)
-		planSpan := a.tracer.Start(nil, "agent.plan", nil)
+
+		// Convert context messages to LLM messages for the actual call
+		var llmMessages []llm.Message
+		for _, m := range planMsgs {
+			llmMessages = append(llmMessages, llm.Message{
+				Role:       m.Role,
+				Content:    m.Content,
+				ToolCallID: m.ToolCallID,
+			})
+		}
+
+		planSpan := a.tracer.Start(nil, "agent.plan", map[string]any{
+			"message_count": len(llmMessages),
+		})
 
 		resp, err := a.llm.Chat(llm.ChatRequest{
-			Messages:  planMsgs,
-			Tools:     a.toolDefs,
+			Messages:  llmMessages,
+			Tools:     a.toolDefsToLLM(a.toolDefs),
 			MaxTokens: a.cfg.LLM.MaxTokens,
 			Model:     a.cfg.LLM.Model,
 		})
+		planDuration := time.Since(planStart)
 		planSpan.End()
 
 		if err != nil {
@@ -101,61 +214,98 @@ func (a *Agent) Run(task string) (string, error) {
 
 		totalTokens += resp.Usage.TotalTokens
 		a.ctxMgr.RecordTokens(ctx.CallPlan, resp.Usage.TotalTokens)
-		a.metrics.RecordLLMCall(a.llm.Name(), a.cfg.LLM.Model, time.Since(iterStart), resp.Usage.TotalTokens)
-		log.Printf("[agent] plan: %d tokens (total: %d)", resp.Usage.TotalTokens, totalTokens)
+		a.metrics.RecordLLMCall(a.llm.Name(), a.cfg.LLM.Model, planDuration, resp.Usage.TotalTokens)
+
+		log.Printf("[agent] ┌─ PLAN ─────────────────────────────────")
+		log.Printf("[agent] │ tokens: %d (total: %d)", resp.Usage.TotalTokens, totalTokens)
+		log.Printf("[agent] │ tool_calls: %d", len(resp.ToolCalls))
+		log.Printf("[agent] │ duration: %v", planDuration)
+		if resp.Content != "" {
+			log.Printf("[agent] │ response: %s", truncate(resp.Content, 150))
+		}
+		log.Printf("[agent] └─────────────────────────────────────────")
 
 		if totalTokens >= a.cfg.Agent.MaxTokensPerRun {
 			iterSpan.End()
 			return "Token budget reached. Stopping.", nil
 		}
 
-		// No tool calls → agent is done, produce final answer
+		// No tool calls → agent is done
 		if len(resp.ToolCalls) == 0 {
-			log.Printf("[agent] no tool calls, producing final answer")
+			log.Printf("[agent] no tool calls — ready for final answer")
 			iterSpan.End()
 			a.metrics.RecordIteration(a.cfg.Name, iter+1, time.Since(iterStart), totalTokens)
-			return resp.Content, nil
+			break
 		}
 
 		// ── EXECUTE (sandboxed) ──
+		execStart := time.Now()
 		execSpan := a.tracer.Start(nil, "agent.execute", map[string]any{
 			"tool_count": len(resp.ToolCalls),
 		})
 
-		// Build sub-tasks from tool calls
 		subTasks := a.buildSubTasks(resp.ToolCalls)
-		log.Printf("[agent] %d sub-tasks for sandbox", len(subTasks))
+		log.Printf("[agent] ┌─ EXECUTE (sandboxed) ──────────────────")
+		log.Printf("[agent] │ sub-tasks: %d", len(subTasks))
+		for i, st := range subTasks {
+			log.Printf("[agent] │ [%d] %s", i+1, truncate(st, 80))
+		}
 
-		// Execute through sandbox (isolated LLM calls, minimal context)
 		a.ctxMgr.ExecuteSandboxed(subTasks, a.toolDefs)
+		execDuration := time.Since(execStart)
 		execSpan.End()
 
+		log.Printf("[agent] │ duration: %v", execDuration)
+		log.Printf("[agent] └─────────────────────────────────────────")
+
 		// Log sandbox results
-		for _, sr := range a.ctxMgr.CurrentIter() {
-			log.Printf("[agent] sandbox: %s → %s", sr.ToolName, truncate(sr.Summary, 100))
+		for i, sr := range a.ctxMgr.CurrentIter() {
+			log.Printf("[agent]   sandbox[%d]: %s → %d tokens, %d chars",
+				i, sr.ToolName, sr.TokensUsed, len(sr.Summary))
 		}
 
 		// ── REFLECT ──
-		reflectSpan := a.tracer.Start(nil, "agent.reflect", nil)
+		reflectStart := time.Now()
 		reflectMsgs := a.ctxMgr.BuildReflectContext(systemPrompt, task, a.toolDefs)
 
+		// Convert to LLM messages
+		var llmReflectMsgs []llm.Message
+		for _, m := range reflectMsgs {
+			llmReflectMsgs = append(llmReflectMsgs, llm.Message{
+				Role:       m.Role,
+				Content:    m.Content,
+				ToolCallID: m.ToolCallID,
+			})
+		}
+
+		reflectSpan := a.tracer.Start(nil, "agent.reflect", map[string]any{
+			"message_count": len(llmReflectMsgs),
+		})
+
 		reflectResp, err := a.llm.Chat(llm.ChatRequest{
-			Messages: reflectMsgs,
+			Messages: llmReflectMsgs,
 			MaxTokens: 500,
 			Model:     a.cfg.LLM.Model,
 		})
+		reflectDuration := time.Since(reflectStart)
 		reflectSpan.End()
 
 		if err != nil {
-			log.Printf("[agent] reflect error: %v", err)
+			log.Printf("[agent] ┌─ REFLECT ──────────────────────────────")
+			log.Printf("[agent] │ error: %v", err)
+			log.Printf("[agent] └─────────────────────────────────────────")
 		} else {
 			totalTokens += reflectResp.Usage.TotalTokens
 			a.ctxMgr.RecordTokens(ctx.CallReflect, reflectResp.Usage.TotalTokens)
-			log.Printf("[agent] reflect: %d tokens — %s", reflectResp.Usage.TotalTokens, truncate(reflectResp.Content, 100))
 
-			// If reflect says we're done, produce final answer
+			log.Printf("[agent] ┌─ REFLECT ──────────────────────────────")
+			log.Printf("[agent] │ tokens: %d (total: %d)", reflectResp.Usage.TotalTokens, totalTokens)
+			log.Printf("[agent] │ duration: %v", reflectDuration)
+			log.Printf("[agent] │ response: %s", truncate(reflectResp.Content, 150))
+			log.Printf("[agent] └─────────────────────────────────────────")
+
 			if a.isDoneSignal(reflectResp.Content) {
-				log.Printf("[agent] reflect signals done")
+				log.Printf("[agent] ✓ reflect signals DONE")
 				a.ctxMgr.CommitIteration()
 				iterSpan.End()
 				a.metrics.RecordIteration(a.cfg.Name, iter+1, time.Since(iterStart), totalTokens)
@@ -163,46 +313,107 @@ func (a *Agent) Run(task string) (string, error) {
 			}
 		}
 
-		// Commit iteration summaries for next plan call
+		// Commit iteration summaries
 		a.ctxMgr.CommitIteration()
+
+		// Iteration summary
+		iterDuration := time.Since(iterStart)
+		stats := a.ctxMgr.Stats()
+		log.Printf("[agent] ┌─ ITERATION %d SUMMARY ──────────────────", iter+1)
+		log.Printf("[agent] │ duration: %v", iterDuration)
+		log.Printf("[agent] │ tokens this iter: %d", resp.Usage.TotalTokens)
+		log.Printf("[agent] │ total tokens: %d", totalTokens)
+		log.Printf("[agent] │ summaries: %d", len(a.ctxMgr.Summaries()))
+		log.Printf("[agent] │ breakdown — plan: %d, sandbox: %d, reflect: %d",
+			stats.PlanTokens, stats.SandboxTokens, stats.ReflectTokens)
+		log.Printf("[agent] └─────────────────────────────────────────")
+
 		iterSpan.End()
-		a.metrics.RecordIteration(a.cfg.Name, iter+1, time.Since(iterStart), totalTokens)
+		a.metrics.RecordIteration(a.cfg.Name, iter+1, iterDuration, totalTokens)
 	}
 
 	// ── FINAL ──
-	log.Printf("[agent] producing final answer")
+	finalStart := time.Now()
+	log.Printf("\n[agent] ═══════════════════════════════════════")
+	log.Printf("[agent] ║ FINAL ANSWER")
+	log.Printf("[agent] ═══════════════════════════════════════")
+
 	finalMsgs := a.ctxMgr.BuildFinalContext(systemPrompt, task)
 
+	// Convert to LLM messages
+	var llmFinalMsgs []llm.Message
+	for _, m := range finalMsgs {
+		llmFinalMsgs = append(llmFinalMsgs, llm.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		})
+	}
+
+	finalSpan := a.tracer.Start(nil, "agent.final", map[string]any{
+		"message_count": len(llmFinalMsgs),
+	})
+
 	finalResp, err := a.llm.Chat(llm.ChatRequest{
-		Messages: finalMsgs,
+		Messages: llmFinalMsgs,
 		MaxTokens: a.cfg.LLM.MaxTokens,
 		Model:     a.cfg.LLM.Model,
 	})
+	finalDuration := time.Since(finalStart)
+	finalSpan.End()
+
 	if err != nil {
 		return "", fmt.Errorf("final llm error: %w", err)
 	}
 
 	totalTokens += finalResp.Usage.TotalTokens
 	a.ctxMgr.RecordTokens(ctx.CallFinal, finalResp.Usage.TotalTokens)
-	log.Printf("[agent] final: %d tokens, total run: %d tokens", finalResp.Usage.TotalTokens, totalTokens)
-	log.Printf("[agent] token breakdown — plan: %d, sandbox: %d, reflect: %d, final: %d",
-		a.ctxMgr.Stats().PlanTokens, a.ctxMgr.Stats().SandboxTokens,
-		a.ctxMgr.Stats().ReflectTokens, a.ctxMgr.Stats().FinalTokens)
+
+	stats := a.ctxMgr.Stats()
+	log.Printf("[agent] ┌─ FINAL ─────────────────────────────────")
+	log.Printf("[agent] │ tokens: %d", finalResp.Usage.TotalTokens)
+	log.Printf("[agent] │ duration: %v", finalDuration)
+	log.Printf("[agent] │ response length: %d chars", len(finalResp.Content))
+	log.Printf("[agent] └─────────────────────────────────────────")
+	log.Printf("[agent] ═══════════════════════════════════════════")
+	log.Printf("[agent] ║ RUN COMPLETE")
+	log.Printf("[agent] ║ total tokens: %d", totalTokens)
+	log.Printf("[agent] ║ total time: %v", time.Since(runStart))
+	log.Printf("[agent] ║ breakdown:")
+	log.Printf("[agent] ║   plan:    %d tokens", stats.PlanTokens)
+	log.Printf("[agent] ║   sandbox: %d tokens (%d calls)", stats.SandboxTokens, stats.SandboxCallCount)
+	log.Printf("[agent] ║   reflect: %d tokens", stats.ReflectTokens)
+	log.Printf("[agent] ║   final:   %d tokens", stats.FinalTokens)
+	log.Printf("[agent] ═══════════════════════════════════════════")
 
 	return finalResp.Content, nil
+}
+
+// toolDefsToLLM converts context ToolDefs to LLM ToolDefinitions.
+func (a *Agent) toolDefsToLLM(defs []ctx.ToolDef) []llm.ToolDefinition {
+	var result []llm.ToolDefinition
+	for _, d := range defs {
+		result = append(result, llm.ToolDefinition{
+			Type: d.Type,
+			Function: llm.ToolFunction{
+				Name:        d.Function.Name,
+				Description: d.Function.Description,
+				Parameters:  d.Function.Parameters,
+			},
+		})
+	}
+	return result
 }
 
 // buildSubTasks converts tool calls into sub-task descriptions for the sandbox.
 func (a *Agent) buildSubTasks(calls []llm.ToolCall) []string {
 	var tasks []string
 	for _, tc := range calls {
-		// Parse arguments to build a readable sub-task
 		var args map[string]any
 		json.Unmarshal([]byte(tc.Function.Arguments), &args)
 
 		subTask := fmt.Sprintf("Use %s", tc.Function.Name)
 		if args != nil {
-			// Extract key arguments for the sub-task description
 			if q, ok := args["query"].(string); ok {
 				subTask += fmt.Sprintf(" with query %q", q)
 			}
@@ -253,22 +464,6 @@ func (a *Agent) systemPrompt() string {
 // ToolCount returns the number of available tools.
 func (a *Agent) ToolCount() int {
 	return len(a.toolDefs)
-}
-
-func toolCallsToMCP(calls []llm.ToolCall) []mcp.ToolCall {
-	var result []mcp.ToolCall
-	for _, tc := range calls {
-		var args map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			args = map[string]any{}
-		}
-		result = append(result, mcp.ToolCall{
-			ID:        tc.ID,
-			Name:      tc.Function.Name,
-			Arguments: args,
-		})
-	}
-	return result
 }
 
 func truncate(s string, maxLen int) string {
