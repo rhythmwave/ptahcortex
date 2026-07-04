@@ -255,7 +255,167 @@ context:
 
 ## Open Questions
 
-1. Should sandbox use a cheaper/faster model than main loop? (e.g., gpt-4o-mini for sandbox, gpt-4o for main)
+1. ~~Should sandbox use a cheaper/faster model than main loop?~~ → **Yes, see Local LLM Selector below**
 2. Should sandbox results be cached? (same sub-task + same tools = same result)
 3. How to handle sandbox failures? (fallback to raw result in main loop?)
 4. Should the agent learn which tasks need sandboxing vs direct calls?
+
+## Local LLM Context Selector
+
+### Insight
+
+The last piece of the context selection puzzle: **use a local LLM to decide what context is relevant** before sending to the main (cloud) LLM.
+
+Local LLMs (Ollama, llama.cpp, vLLM) have smaller context windows:
+- 32K tokens (most models)
+- 64K tokens (some models)
+- 128K tokens (top-end local models)
+
+This constraint is actually **a feature**, not a bug. It forces precise context selection.
+
+### Architecture
+
+```
+User Task + Available Context
+            │
+            ▼
+┌───────────────────────┐
+│  Local LLM Selector   │ ← Small, fast, cheap (runs locally)
+│  (32K-128K context)   │
+│                       │
+│  "Which messages are  │
+│   relevant for this   │
+│   specific LLM call?" │
+└───────────┬───────────┘
+            │
+            ▼ (selected subset)
+┌───────────────────────┐
+│  Main LLM Call        │ ← Large, expensive (cloud API)
+│  (only relevant ctx)  │
+└───────────────────────┘
+```
+
+### How It Works
+
+1. **Candidate assembly** — gather all potentially relevant messages (task, tool results, summaries)
+2. **Selection prompt** — ask local LLM: "Given this task, which messages are relevant?"
+3. **Filter** — local LLM returns indices/labels of relevant messages
+4. **Assembly** — build final context from selected messages only
+5. **Main call** — send filtered context to cloud LLM
+
+### Selection Prompt
+
+```
+You are a context selector. Given a task and a list of messages,
+return ONLY the message indices that are relevant to the task.
+
+Task: {task}
+
+Messages:
+[0] System prompt
+[1] User: Review error handling in main.go
+[2] Tool result: Found 3 error patterns in client.go
+[3] Tool result: File listing of /src
+[4] Summary: Error handling uses structured errors with retry
+[5] Tool result: Search results for "TODO" comments
+
+Relevant indices (comma-separated): 0, 1, 2, 4
+```
+
+Local LLM returns: `0, 1, 2, 4`
+Main LLM only sees those 4 messages instead of all 6.
+
+### Why Local LLM?
+
+| Aspect | Cloud LLM | Local LLM |
+|--------|-----------|----------|
+| Cost | $0.01-0.03 per call | Free (after hardware cost) |
+| Latency | 200-500ms | 50-200ms (small model) |
+| Context | 128K-1M | 32K-128K |
+| Quality | High | Good enough for selection |
+| Privacy | Data sent to cloud | Stays local |
+
+The local LLM doesn't need to be smart. It needs to be **fast and precise** at filtering.
+
+### Model Choices for Selection
+
+| Model | Size | Context | Speed | Use Case |
+|-------|------|---------|-------|----------|
+| Phi-3 Mini | 3.8B | 128K | Fast | Best for selection (large context, small model) |
+| Qwen2.5 3B | 3B | 32K | Very fast | Lightweight selection |
+| Llama 3.2 3B | 3B | 128K | Fast | Good balance |
+| Gemma 2 2B | 2B | 8K | Fastest | Simple filtering only |
+
+### Configuration
+
+```yaml
+context:
+  selector:
+    enabled: true
+    provider: ollama              # local LLM provider
+    model: phi3-mini              # small model for selection
+    base_url: http://localhost:11434
+    max_input_tokens: 8000        # max tokens to send to selector
+    strategy: relevance           # relevance | dependency | both
+```
+
+### Cost Impact
+
+Without local selector:
+- 20 iterations × cloud LLM = 20 API calls for context selection
+- Cost: ~$0.20-0.60 per agent run
+
+With local selector:
+- 20 iterations × local LLM (free) + 20 cloud LLM (filtered)
+- Cost: ~$0.06-0.18 per agent run (70% cost reduction)
+
+### The Full Pipeline
+
+```
+┌──────────────────────────────────────────────────┐
+│                 Agent Run                         │
+│                                                  │
+│  ┌──────────┐                                    │
+│  │  Plan    │ ← Context: T0+T1+T3               │
+│  └────┬─────┘                                    │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────────────┐                            │
+│  │ Local LLM Select │ ← "Which tools for this?" │
+│  └────┬─────────────┘                            │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────────────┐                            │
+│  │ Tool Sandbox     │ ← Isolated, minimal ctx    │
+│  └────┬─────────────┘                            │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────────────┐                            │
+│  │ Local LLM Filter │ ← "Which results matter?" │
+│  └────┬─────────────┘                            │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────┐                                    │
+│  │ Reflect  │ ← Context: T0+T1+filtered T2      │
+│  └────┬─────┘                                    │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────┐                                    │
+│  │ Final    │ ← Context: T0+T1+all summaries    │
+│  └──────────┘                                    │
+└──────────────────────────────────────────────────┘
+```
+
+### Summary
+
+The local LLM acts as a **gatekeeper** between raw context and the cloud LLM:
+- Selects what's relevant before the main call
+- Runs for free (local) vs $0.01-0.03 per call (cloud)
+- Forces precise context selection (small window = precision)
+- Adds ~100ms latency (acceptable for the cost savings)
+
+This completes the context engineering stack:
+1. **Call-type-aware assembly** (different recipes per call)
+2. **Tool sandboxing** (isolated tool reasoning)
+3. **Local LLM selection** (relevance filtering before main call)
+4. **Summary flow** (only summaries flow up)
