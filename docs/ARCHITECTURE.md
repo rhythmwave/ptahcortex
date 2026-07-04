@@ -1,196 +1,237 @@
-# Architecture
+# Ptahcortex Architecture
 
 ## Overview
 
-Ptahcortex is a Go framework for building AI agents that use MCP (Model Context Protocol) for tool calling. The core design principles:
+Ptahcortex is a Go framework for building AI agents with MCP tool calling and call-aware context assembly.
 
-1. **Separation of concerns** — Agent logic, tool execution, LLM communication, and observability are independent layers
-2. **Config-driven** — Agents are defined in YAML, not code
-3. **MCP-first** — Tools are discovered and called via MCP protocol, not hardcoded
-4. **Production-ready** — Built-in retry, timeout, cost tracking, OTel observability
+**Key innovation:** Different LLM calls get different context based on their purpose, reducing token usage by ~72-90%.
 
-## Core Components
+## Core Principles
 
-### 1. Agent Loop
+1. **MCP-native** — tools come from MCP servers, not hardcoded plugins
+2. **Call-aware context** — different context per LLM call type
+3. **Sandboxed tool reasoning** — isolated LLM calls for tool selection
+4. **Summary flow** — only summaries flow up, raw results stay local
+5. **Production-ready** — retry, timeout, observability, single binary
 
-The agent loop is the heart of Ptahcortex. Each iteration follows:
+## System Architecture
 
 ```
-┌─────────┐     ┌──────────┐     ┌───────────┐
-│  Plan   │────→│ Execute  │────→│  Reflect  │
-│  (LLM)  │     │ (Tools)  │     │   (LLM)   │
-└─────────┘     └──────────┘     └───────────┘
-     ↑                                   │
-     └───────────── if needed ───────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Ptahcortex Runtime                        │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │                  Context Manager                       │  │
+│  │                                                       │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐           │  │
+│  │  │ Assembler│  │ Sandbox  │  │ Summarizer│           │  │
+│  │  │ (per     │  │ (isolated│  │ (summary  │           │  │
+│  │  │ calltype)│  │  LLM)    │  │  flow)    │           │  │
+│  │  └──────────┘  └──────────┘  └──────────┘           │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                           │                                  │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │                  Agent Loop                            │  │
+│  │                                                       │  │
+│  │  Plan → Sandbox → Collect → Reflect → Final           │  │
+│  │    │        │         │         │         │           │  │
+│  │    │        │         │         │         │           │  │
+│  │    ▼        ▼         ▼         ▼         ▼           │  │
+│  │  T0+T1   T0+sub   summary   T0+T1+T2  T0+T1+all     │  │
+│  │  +T3     +tools    only      +summaries +summaries    │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                           │                                  │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │                 Tool Execution                         │  │
+│  │                                                       │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐           │  │
+│  │  │ Parallel │  │ Retry    │  │ Timeout  │           │  │
+│  │  │ Executor │  │ (backoff)│  │ (per-tool)│           │  │
+│  │  └──────────┘  └──────────┘  └──────────┘           │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                           │                                  │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │               MCP Client Manager                      │  │
+│  │                                                       │  │
+│  │  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐     │  │
+│  │  │ Lexa   │  │ File   │  │ Web    │  │ Custom │     │  │
+│  │  │ (code) │  │ System │  │ Search │  │ Server │     │  │
+│  │  └────────┘  └────────┘  └────────┘  └────────┘     │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                           │                                  │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │               LLM Provider Interface                   │  │
+│  │                                                       │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐           │  │
+│  │  │ OpenAI   │  │ Anthropic│  │ Proxy    │           │  │
+│  │  │ Compat   │  │ Compat   │  │ (Code    │           │  │
+│  │  │          │  │          │  │  Agent)  │           │  │
+│  │  └──────────┘  └──────────┘  └──────────┘           │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                           │                                  │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │               OTel Observability                       │  │
+│  │                                                       │  │
+│  │  Traces: agent.run → agent.iteration → tool.call      │  │
+│  │  Metrics: tokens, latency, tool calls, errors         │  │
+│  │  Logs: structured JSON with trace correlation         │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Plan phase:**
-- Send task + available tools + context to LLM
-- LLM returns a plan: which tools to call, with what arguments
-- Agent parses tool calls from LLM response
+## Context Engineering Stack
 
-**Execute phase:**
-- Independent tool calls run in parallel (goroutines)
-- Dependent tools run sequentially (output feeds input)
-- Each call has timeout + retry
-- Results collected and formatted
+The context manager has four layers:
 
-**Reflect phase:**
-- LLM evaluates tool results
-- Decides: done (return result), or need more iterations
-- If more: new plan with updated context
-- Token budget checked before continuing
-
-### 2. MCP Client
-
-Implements the MCP protocol (stdio JSON-RPC 2.0):
-
-```go
-// Client manages a single MCP server connection
-type Client struct {
-    cmd     *exec.Cmd
-    stdin   io.WriteCloser
-    stdout  *bufio.Reader
-    tools   []Tool
-    nextID  int
-}
-
-// Key operations:
-// - Initialize: handshake with server
-// - ListTools: discover available tools
-// - CallTool: execute a tool with arguments
-// - Close: graceful shutdown
+```
+┌─────────────────────────────────────────────┐
+│  4. Local LLM Selection                     │ ← Relevance filter (Phase 4)
+├─────────────────────────────────────────────┤
+│  3. Tool Sandboxing                         │ ← Isolated tool reasoning (Phase 2)
+├─────────────────────────────────────────────┤
+│  2. Call-Aware Assembly                     │ ← Different context per call type (Phase 1)
+├─────────────────────────────────────────────┤
+│  1. Summary Flow                            │ ← Only summaries flow up (Phase 3)
+└─────────────────────────────────────────────┘
 ```
 
-**Manager** handles multiple MCP servers:
-- Starts each server process
-- Aggregates tools from all servers
-- Routes tool calls to correct server
-- Handles server failures independently
+### Layer 1: Summary Flow
 
-### 3. LLM Provider Interface
+Raw tool results stay in the sandbox. Only concise summaries flow to the main loop.
 
-```go
-type Provider interface {
-    Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
-    Name() string
-}
-
-type ChatRequest struct {
-    Messages  []Message
-    Tools     []ToolDefinition
-    MaxTokens int
-    Model     string
-}
-
-type ChatResponse struct {
-    Content   string
-    ToolCalls []ToolCall
-    Usage     TokenUsage
-}
+```
+Tool Result (10K chars) → Sandbox → Summary (500 chars) → Main Loop
 ```
 
-Implementations:
-- **OpenAI** — `/v1/chat/completions` compatible
-- **Anthropic** — `/v1/messages` compatible
-- **Proxy** — routes through Code Agent Proxy (supports both APIs)
+### Layer 2: Call-Aware Assembly
 
-### 4. Tool Execution Engine
+Different LLM calls get different context based on their purpose.
 
-Handles the mechanics of calling tools:
+| Call Type | Context Tiers | What's Included |
+|-----------|--------------|-----------------|
+| Plan | T0 + T1 + T3 | System + task + previous summaries |
+| Sandbox Select | T0 + sub-task | System + sub-task + tool descriptions |
+| Sandbox Eval | sub-task + result | Sub-task + tool result (truncated) |
+| Reflect | T0 + T1 + T2 | System + task + current summaries |
+| Final | T0 + T1 + all | System + task + all relevant summaries |
 
-- **Parallel execution** — independent tools run concurrently with semaphore limiting
-- **Sequential execution** — dependent tools run in order
-- **Retry** — exponential backoff with jitter
-- **Timeout** — per-tool and per-iteration
-- **Error handling** — structured errors with context
+### Layer 3: Tool Sandboxing
 
-```go
-type ToolExecutor struct {
-    maxParallel int
-    timeout     time.Duration
-    retryPolicy RetryPolicy
-    mcpManager  *mcp.Manager
-}
+Tool reasoning happens in isolated, cheap LLM calls. Main loop never sees raw tool output.
 
-func (e *ToolExecutor) Execute(ctx context.Context, calls []ToolCall) ([]ToolResult, error)
+```
+Main Loop → "Find error handling in main.go"
+                ↓
+Sandbox (isolated, minimal context):
+  Select: "Use text_search"
+  Call: text_search("error handling", "main.go")
+  Eval: "Error handling uses structured errors with retry..."
+                ↓
+Main Loop ← Summary only
 ```
 
-### 5. OTel Observability
+### Layer 4: Local LLM Selection (Optional)
 
-Every component emits telemetry:
+Small local model filters context before cloud call.
 
-**Traces:**
-- `agent.run` — full agent execution (parent span)
-- `agent.iteration` — single plan→execute→reflect cycle
-- `agent.plan` — LLM planning call
-- `agent.execute` — tool execution batch
-- `agent.reflect` — LLM reflection call
-- `mcp.call_tool` — individual MCP tool call
-- `llm.chat` — LLM API call
-
-**Metrics:**
-- `ptahcortex_iterations_total` — counter by agent/status
-- `ptahcortex_tool_calls_total` — counter by tool/status
-- `ptahcortex_llm_tokens_total` — counter by direction (input/output)
-- `ptahcortex_llm_latency_seconds` — histogram
-- `ptahcortex_tool_latency_seconds` — histogram by tool
-
-**Logs:**
-- Structured JSON with trace correlation
-- Agent ID, iteration, tool name in every log line
+```
+All Context (50K tokens)
+        ↓
+Local LLM (3B, free): "Indices 0, 2, 5 are relevant"
+        ↓
+Filtered Context (15K tokens) → Cloud LLM
+```
 
 ## Data Flow
 
 ```
-User Input
+User Task
     │
     ▼
-┌─────────────┐
-│ Agent.Run() │
-└──────┬──────┘
-       │
-       ▼
 ┌─────────────────────────────────────────┐
 │ Iteration Loop (max N times)            │
 │                                         │
-│  1. Plan: LLM + tools + context → plan  │
-│     └─ OTel: agent.plan span            │
+│  1. Plan: ContextAssembler(T0+T1+T3)   │
+│     └─ LLM call → plan + sub-tasks      │
 │                                         │
-│  2. Execute: parallel/sequential tools  │
-│     ├─ OTel: agent.execute span         │
-│     └─ OTel: mcp.call_tool per tool     │
+│  2. Sandbox: for each sub-task          │
+│     ├─ Select: ContextAssembler(T0+sub) │
+│     │  └─ LLM call → tool selection     │
+│     ├─ Execute: MCP tool call           │
+│     └─ Eval: ContextAssembler(sub+res)  │
+│        └─ LLM call → summary            │
 │                                         │
-│  3. Reflect: LLM evaluates results      │
-│     ├─ OTel: agent.reflect span         │
-│     └─ Decision: done or continue       │
+│  3. Collect: aggregate sandbox summaries │
+│                                         │
+│  4. Reflect: ContextAssembler(T0+T1+T2) │
+│     └─ LLM call → done or continue      │
 └─────────────────────────────────────────┘
-       │
-       ▼
-   Final Result
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│ Final: ContextAssembler(T0+T1+all)      │
+│ └─ LLM call → final answer              │
+└─────────────────────────────────────────┘
+    │
+    ▼
+Response to User
+```
+
+## Token Comparison
+
+### Without Context Engineering
+
+```
+Iteration 1: 4,700 tokens
+Iteration 2: 7,700 tokens
+Iteration 3: 10,700 tokens
+...
+Iteration 20: 25,700 tokens
+Total: ~650,000 tokens
+```
+
+### With Context Engineering (Phases 1-3)
+
+```
+Main calls:    20 × 2,200  =  44,000 tokens
+Sandbox calls: 60 × 1,100  =  66,000 tokens
+Reflect calls: 20 × 3,200  =  64,000 tokens
+Final call:     1 × 5,700  =   5,700 tokens
+Total:                        ~180,000 tokens
+Savings:                      ~72%
+```
+
+### With Context Engineering (All Phases)
+
+```
+Same as above, but:
+- Local LLM filters context before cloud calls
+- Additional ~70% cost reduction on remaining tokens
+- Net savings: ~90%+ cost reduction
 ```
 
 ## Configuration
 
-Two config files:
-
-### agent.yaml — Agent Definition
 ```yaml
-name: my-agent
-description: What this agent does
+# Agent definition
+name: code-reviewer
+description: Reviews pull requests using code intelligence
 
+# LLM settings
 llm:
   provider: openai
   model: gpt-4o
   base_url: http://localhost:8080/v1
   max_tokens: 4096
 
+# MCP servers
 mcp_servers:
   - name: lexa
-    command: /path/to/lexa
-    args: ["serve"]
-    cwd: /path/to/project
+    command: /home/deploy/.local/bin/lexa
+    args: ["mcp"]
+    cwd: /home/deploy/commit-reviewer-src
 
+# Tool execution
 tools:
   max_parallel: 5
   timeout: 30s
@@ -198,61 +239,82 @@ tools:
     max_attempts: 3
     backoff: 1s
 
+# Agent loop
 agent:
   max_iterations: 5
   max_tokens_per_run: 50000
-  reflect_after_each: true
+
+# Context engineering
+context:
+  # Call-aware assembly
+  assembly:
+    enabled: true
+    max_tool_result_len: 4000
+    max_messages: 20
+    keep_first_user: true
+
+  # Tool sandboxing
+  sandbox:
+    enabled: true
+    max_sandbox_iterations: 3
+    summary_max_tokens: 500
+
+  # Local LLM selection (optional)
+  selector:
+    enabled: false
+    provider: ollama
+    model: phi3-mini
+    base_url: http://localhost:11434
+    max_input_tokens: 8000
 ```
 
-### mcp-servers.yaml — MCP Server Registry
-```yaml
-servers:
-  lexa:
-    description: Code intelligence
-    command: /home/deploy/.local/bin/lexa
-    args: ["serve"]
-    cwd: /home/deploy/commit-reviewer-src
-    tools:
-      - search_code
-      - find_symbol
-      - find_references
+## Project Structure
 
-  filesystem:
-    description: File operations
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
-    tools:
-      - read_file
-      - write_file
-      - list_directory
+```
+ptahcortex/
+├── cmd/ptahcortex/          # CLI entrypoint
+│   └── main.go
+├── internal/
+│   ├── agent/               # Agent loop + context manager
+│   │   ├── agent.go         # Main agent loop
+│   │   ├── context.go       # CallType enum + ContextAssembler
+│   │   ├── assembler.go     # Message assembly per call type
+│   │   ├── sandbox.go       # Sandbox executor
+│   │   ├── summarizer.go    # Summary extraction
+│   │   └── local_selector.go # Local LLM selector (Phase 4)
+│   ├── mcp/                 # MCP client (stdio JSON-RPC)
+│   │   ├── client.go
+│   │   └── manager.go
+│   ├── llm/                 # LLM provider interface
+│   │   └── provider.go      # OpenAI + Anthropic + Proxy
+│   ├── tools/               # Tool execution engine
+│   │   └── executor.go      # Parallel, retry, timeout
+│   ├── otel/                # Observability
+│   │   └── tracer.go        # Spans + metrics
+│   └── config/              # Configuration
+│       └── config.go        # YAML loader
+├── configs/                 # Example agent configs
+│   ├── agent.yaml
+│   ├── code-reviewer.yaml
+│   ├── doc-qa.yaml
+│   └── task-planner.yaml
+└── docs/                    # Documentation
+    ├── ARCHITECTURE.md      # This file
+    ├── CONTEXT-MANAGER.md   # Context manager design
+    ├── CONTEXT-ENGINEERING.md # Landscape analysis
+    ├── VALIDATION.md        # Feasibility assessment
+    ├── TASK-BREAKDOWN.md    # Phased implementation plan
+    ├── MCP.md               # MCP integration guide
+    ├── TOOLS.md             # Tool calling patterns
+    └── ROADMAP.md           # Development roadmap
 ```
 
-## Error Handling
+## Related Documentation
 
-Ptahcortex handles errors at multiple levels:
-
-1. **Tool errors** — retry, then report to LLM as tool error result
-2. **LLM errors** — retry with backoff, fallback to alternative provider
-3. **MCP server errors** — restart server, retry tool call
-4. **Timeout errors** — cancel current iteration, report partial results
-5. **Budget exceeded** — stop iteration loop, return best result so far
-
-All errors are structured:
-
-```go
-type AgentError struct {
-    Code     string
-    Message  string
-    Tool     string
-    Iteration int
-    Err      error
-}
-```
-
-## Security Considerations
-
-- MCP servers run as child processes with bounded permissions
-- Tool arguments are validated against JSON schema before execution
-- Token budgets prevent runaway LLM costs
-- Rate limiting prevents abuse
-- No arbitrary code execution — only MCP tool calls
+- [Context Manager Design](CONTEXT-MANAGER.md) — detailed design with call types and tiers
+- [Context Engineering Landscape](CONTEXT-ENGINEERING.md) — field analysis and positioning
+- [Validation Assessment](VALIDATION.md) — honest confidence levels and risks
+- [Task Breakdown](TASK-BREAKDOWN.md) — phased implementation plan
+- [MCP Integration](MCP.md) — MCP protocol and server setup
+- [Tool Calling Patterns](TOOLS.md) — parallel, retry, timeout patterns
+- [Development Roadmap](ROADMAP.md) — 6-week timeline
