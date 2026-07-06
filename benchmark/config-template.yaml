@@ -1,0 +1,28 @@
+# Benchmark Config Template
+# Replace {{MODEL}} with actual model name
+
+name: benchmark-agent
+description: >
+  Benchmark agent for comparing model performance.
+  Uses Lexa code intelligence tools.
+
+llm:
+  provider: openai
+  model: {{MODEL}}
+  base_url: https://ai.sumopod.com
+  api_key: sk-bzu08x_omiQ_lj5ZL2IHcg
+  max_tokens: 4096
+
+mcp_servers:
+  - name: lexa
+    command: /home/deploy/.local/bin/lexa
+    args: ["mcp"]
+    cwd: /home/deploy/commit-reviewer-src
+
+tools:
+  max_parallel: 5
+  timeout: 30s
+
+agent:
+  max_iterations: 3
+  max_tokens_per_run: 25000
