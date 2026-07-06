@@ -91,3 +91,19 @@ Based on architecture analysis:
 ## Results
 
 Results saved to `results/` as JSON.
+
+### Comparison Analysis
+
+- **AIDER-RESULT.md**: Aider benchmark result for code review task
+- **COMPREHENSIVE-COMPARISON.md**: Detailed Ptahcortex vs Aider comparison
+
+### Key Findings
+
+| Metric | Ptahcortex | Aider |
+|--------|------------|-------|
+| Tokens | 14,353 | 3,775 |
+| Findings | 7 | 5 |
+| High Severity | 3 | 0 |
+| Cost | ~$0.02 | $0.002 |
+
+**Conclusion**: Ptahcortex provides deeper analysis with more high-severity findings, while Aider is more token-efficient and cost-effective.
