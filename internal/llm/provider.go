@@ -140,8 +140,9 @@ func (p *OpenAIProvider) Chat(req ChatRequest) (*ChatResponse, error) {
 	var result struct {
 		Choices []struct {
 			Message struct {
-				Content   string     `json:"content"`
-				ToolCalls []ToolCall `json:"tool_calls"`
+				Content          string     `json:"content"`
+				ReasoningContent string     `json:"reasoning_content,omitempty"`
+				ToolCalls        []ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage TokenUsage `json:"usage"`
@@ -155,8 +156,14 @@ func (p *OpenAIProvider) Chat(req ChatRequest) (*ChatResponse, error) {
 		return nil, fmt.Errorf("no choices in response")
 	}
 
+	// Use content if available, otherwise fall back to reasoning_content
+	content := result.Choices[0].Message.Content
+	if content == "" && result.Choices[0].Message.ReasoningContent != "" {
+		content = result.Choices[0].Message.ReasoningContent
+	}
+
 	return &ChatResponse{
-		Content:   result.Choices[0].Message.Content,
+		Content:   content,
 		ToolCalls: result.Choices[0].Message.ToolCalls,
 		Usage:     result.Usage,
 	}, nil
