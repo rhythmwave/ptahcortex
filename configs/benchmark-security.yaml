@@ -1,0 +1,38 @@
+# Benchmark Config for Complex Security Audit
+# Uses GLM-5.1 via ai.sumopod.com
+
+name: security-auditor
+description: >
+  You are a senior security auditor. Perform comprehensive security analysis
+  of the codebase. Focus on:
+  - Authentication and authorization flows
+  - Input validation and sanitization
+  - Race conditions and concurrency issues
+  - Injection vulnerabilities
+  - Error handling and information leakage
+  - Resource management and leaks
+  - TLS/SSL configuration
+  
+  Use code intelligence tools to trace data flows, find related code,
+  and assess security impact.
+
+llm:
+  provider: openai
+  model: glm-5.1
+  base_url: https://ai.sumopod.com
+  api_key: sk-bzu08x_omiQ_lj5ZL2IHcg
+  max_tokens: 8192
+
+mcp_servers:
+  - name: lexa
+    command: /home/deploy/.local/bin/lexa
+    args: ["mcp"]
+    cwd: /home/deploy/commit-reviewer-src
+
+tools:
+  max_parallel: 5
+  timeout: 30s
+
+agent:
+  max_iterations: 8
+  max_tokens_per_run: 100000

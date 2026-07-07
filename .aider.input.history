@@ -1,0 +1,78 @@
+
+# 2026-07-06 15:15:43.916566
++Say hello in 5 words
+
+# 2026-07-06 15:16:26.379204
++Review the error handling in cmd/agentkit/main.go. Focus on:
+
+# 2026-07-06 15:16:44.962784
++1. Resource leaks (unclosed connections, file handles)
+
+# 2026-07-06 15:16:53.765425
++2. Error wrapping and context
+
+# 2026-07-06 15:17:15.482043
++3. Race conditions
+
+# 2026-07-06 15:17:24.295597
++4. Graceful shutdown
+
+# 2026-07-06 15:17:46.362745
++5. Input validation
+
+# 2026-07-06 15:17:56.506683
++Provide specific line numbers and severity ratings.
+
+# 2026-07-06 15:18:28.001107
++cmd/agentkit/main.go
+
+# 2026-07-06 15:22:00.209047
++Review the error handling in cmd/agentkit/main.go. Focus on resource leaks, error wrapping, race conditions, graceful shutdown, and input validation. Provide specific line numbers and severity ratings.
+
+# 2026-07-06 15:22:18.095665
++Review the error handling in main.go. Focus on resource leaks, error wrapping, race conditions, graceful shutdown, and input validation. Provide specific line numbers and severity ratings.
+
+# 2026-07-06 15:52:35.188706
++Perform a comprehensive security audit of the MCP client implementation in internal/mcp/client.go. 
+
+# 2026-07-06 15:52:47.264371
++Specifically:
+
+# 2026-07-06 15:52:50.324226
++1. Trace the full authentication flow from client initialization to request signing
+
+# 2026-07-06 15:52:52.386700
++2. Identify all input validation gaps
+
+# 2026-07-06 15:52:59.042764
++3. Find race conditions in concurrent tool execution
+
+# 2026-07-06 15:53:02.958850
++4. Detect potential injection vulnerabilities in tool argument handling
+
+# 2026-07-06 15:53:12.360733
++5. Map all error handling paths and identify silent failures
+
+# 2026-07-06 15:53:12.384967
++6. Check for resource leaks (unclosed connections, goroutine leaks, file handles)
+
+# 2026-07-06 15:53:12.404854
++7. Verify TLS certificate validation and hostname verification
+
+# 2026-07-06 15:53:12.438570
++For each finding:
+
+# 2026-07-06 15:53:14.024047
++- Specify exact file and line numbers
+
+# 2026-07-06 15:53:20.433402
++- Rate severity (Critical/High/Medium/Low)
+
+# 2026-07-06 15:53:25.392815
++- Explain attack vector or failure scenario
+
+# 2026-07-06 15:53:31.519174
++- Suggest fix with code snippet
+
+# 2026-07-06 17:35:01.502220
++Security audit of MCP client and tool executor. Find race conditions, resource leaks, and injection vulnerabilities across all files. Provide specific line numbers and severity ratings.

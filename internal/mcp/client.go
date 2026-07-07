@@ -91,6 +91,26 @@ func (c *Client) Tools() []Tool {
 
 // CallTool calls a tool on this server.
 func (c *Client) CallTool(name string, arguments map[string]any) (*ToolResult, error) {
+	// Validate tool name: allow only alphanumeric, dash, underscore
+	for _, r := range name {
+		if !(r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return nil, fmt.Errorf("invalid tool name: %q", name)
+		}
+	}
+
+	// Validate arguments: ensure keys are non-empty strings and values are basic types
+	for k, v := range arguments {
+		if k == "" {
+			return nil, fmt.Errorf("empty argument key")
+		}
+		switch v.(type) {
+		case string, bool, float64, int, int64, nil:
+			// allowed types
+		default:
+			return nil, fmt.Errorf("unsupported argument type for key %q: %T", k, v)
+		}
+	}
+
 	resp, err := c.request("tools/call", map[string]any{
 		"name":      name,
 		"arguments": arguments,

@@ -1,0 +1,112 @@
+version: 1
+
+# Tool mappings for Ptahcortex
+# Maps task categories to Lexa tools and keywords
+
+mappings:
+  security:
+    description: "Security audit and vulnerability scanning"
+    tools:
+      - text_search
+      - callers
+      - trace_deps
+      - audit
+    keywords:
+      - race condition
+      - mutex
+      - goroutine
+      - injection
+      - xss
+      - sql injection
+      - vulnerability
+      - security
+    auto_detect: true
+    
+  auth:
+    description: "Authentication and authorization analysis"
+    tools:
+      - text_search
+      - outline
+      - read
+      - callers
+    keywords:
+      - oauth
+      - pkce
+      - token
+      - session
+      - jwt
+      - login
+      - authentication
+      - authorization
+    auto_detect: true
+    
+  review:
+    description: "Code review and quality analysis"
+    tools:
+      - outline
+      - text_search
+      - callers
+      - audit
+    keywords:
+      - error handling
+      - logging
+      - performance
+      - complexity
+      - code review
+      - quality
+    auto_detect: true
+    
+  debug:
+    description: "Debugging and error investigation"
+    tools:
+      - text_search
+      - read
+      - callers
+    keywords:
+      - error
+      - bug
+      - crash
+      - panic
+      - stack trace
+    auto_detect: true
+    
+  performance:
+    description: "Performance analysis and optimization"
+    tools:
+      - text_search
+      - callers
+      - trace_deps
+    keywords:
+      - slow
+      - performance
+      - bottleneck
+      - memory
+      - cpu
+      - latency
+    auto_detect: true
+    
+  refactor:
+    description: "Code refactoring and restructuring"
+    tools:
+      - outline
+      - callers
+      - trace_deps
+      - read
+    keywords:
+      - refactor
+      - clean
+      - restructure
+      - simplify
+      - extract
+    auto_detect: true
+
+# Commands (quick access)
+commands:
+  /security: security
+  /auth: auth
+  /review: review
+  /debug: debug
+  /perf: performance
+  /refactor: refactor
+  /audit: security
+  /check: review
