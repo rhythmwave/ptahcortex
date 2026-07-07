@@ -38,7 +38,7 @@ func NewSmartAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Ma
 	}
 }
 
-// Run executes the agent with LLM planning
+// Run executes the agent with iterative planning
 func (a *SmartAgent) Run(task string) (string, error) {
 	start := time.Now()
 	runSpan := a.tracer.Start(nil, "agent.run", map[string]any{
@@ -50,24 +50,56 @@ func (a *SmartAgent) Run(task string) (string, error) {
 	log.Printf("\n[smart-agent] ═══════════════════════════════════════")
 	log.Printf("[smart-agent] ║ TASK: %s", truncate(task, 60))
 	log.Printf("[smart-agent] ║ LEXA: %v", a.useLexa)
+	log.Printf("[smart-agent] ║ MAX ITERATIONS: %d", a.cfg.Agent.MaxIterations)
 	log.Printf("[smart-agent] ═══════════════════════════════════════")
 
-	// Step 1: LLM Plans what to do (1 call)
-	log.Printf("\n[smart-agent] Step 1: LLM planning")
-	toolCalls, err := a.plan(task)
-	if err != nil {
-		return "", fmt.Errorf("plan: %w", err)
+	// Iterative loop
+	var allResults map[string]string
+	allResults = make(map[string]string)
+	
+	for iteration := 0; iteration < a.cfg.Agent.MaxIterations; iteration++ {
+		log.Printf("\n[smart-agent] ═══════════════════════════════════════")
+		log.Printf("[smart-agent] ║ ITERATION %d/%d", iteration+1, a.cfg.Agent.MaxIterations)
+		log.Printf("[smart-agent] ═══════════════════════════════════════")
+
+		// Step 1: LLM Plans what to do
+		log.Printf("\n[smart-agent] Step 1: LLM planning")
+		toolCalls, err := a.plan(task, allResults, iteration)
+		if err != nil {
+			return "", fmt.Errorf("plan: %w", err)
+		}
+		log.Printf("[smart-agent] Planned %d tool calls", len(toolCalls))
+
+		// Step 2: Execute tools
+		log.Printf("\n[smart-agent] Step 2: Executing tools")
+		results := a.executeTools(toolCalls)
+		
+		// Merge results
+		for k, v := range results {
+			allResults[k] = v
+		}
+		log.Printf("[smart-agent] Executed %d tools (total: %d)", len(results), len(allResults))
+
+		// Step 3: Check if we should continue
+		log.Printf("\n[smart-agent] Step 3: Checking completion")
+		done, err := a.checkCompletion(task, allResults, iteration)
+		if err != nil {
+			return "", fmt.Errorf("check completion: %w", err)
+		}
+		
+		if done {
+			log.Printf("[smart-agent] ║ ITERATION %d: DONE", iteration+1)
+			break
+		}
+		
+		log.Printf("[smart-agent] ║ ITERATION %d: CONTINUING", iteration+1)
 	}
-	log.Printf("[smart-agent] Planned %d tool calls", len(toolCalls))
 
-	// Step 2: Execute tools (0 tokens)
-	log.Printf("\n[smart-agent] Step 2: Executing tools")
-	results := a.executeTools(toolCalls)
-	log.Printf("[smart-agent] Executed %d tools", len(results))
-
-	// Step 3: LLM Analyzes results (1 call)
-	log.Printf("\n[smart-agent] Step 3: LLM analyzing results")
-	analysis, err := a.analyze(task, results)
+	// Final analysis
+	log.Printf("\n[smart-agent] ═══════════════════════════════════════")
+	log.Printf("[smart-agent] ║ FINAL ANALYSIS")
+	log.Printf("[smart-agent] ═══════════════════════════════════════")
+	analysis, err := a.analyze(task, allResults)
 	if err != nil {
 		return "", fmt.Errorf("analyze: %w", err)
 	}
@@ -76,27 +108,46 @@ func (a *SmartAgent) Run(task string) (string, error) {
 	log.Printf("\n[smart-agent] ═══════════════════════════════════════")
 	log.Printf("[smart-agent] ║ COMPLETE")
 	log.Printf("[smart-agent] ║ duration: %v", duration)
-	log.Printf("[smart-agent] ║ tool calls: %d", len(toolCalls))
+	log.Printf("[smart-agent] ║ tool calls: %d", len(allResults))
+	log.Printf("[smart-agent] ║ iterations: %d", a.cfg.Agent.MaxIterations)
 	log.Printf("[smart-agent] ═══════════════════════════════════════")
 
 	return analysis, nil
 }
 
 // plan uses LLM to plan what tools to use
-func (a *SmartAgent) plan(task string) ([]ToolCall, error) {
+func (a *SmartAgent) plan(task string, previousResults map[string]string, iteration int) ([]ToolCall, error) {
 	// Build available tools
 	toolsList := a.buildToolDefinitions()
 	
+	// Build context from previous results
+	var context strings.Builder
+	if len(previousResults) > 0 {
+		context.WriteString("\n\nPREVIOUS RESULTS:\n")
+		for tool, result := range previousResults {
+			// Truncate long results
+			truncated := result
+			if len(truncated) > 500 {
+				truncated = truncated[:500] + "..."
+			}
+			context.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", tool, truncated))
+		}
+	}
+	
 	prompt := fmt.Sprintf(`I need to complete this task: %s
 
+This is iteration %d of %d.
 Use the available tools to accomplish this task.
 You can use multiple tools in sequence.
 
-IMPORTANT: For code search and analysis, use Lexa tools (search, outline, audit) instead of basic tools (exec, list_files).`, task)
+IMPORTANT: For code search and analysis, use Lexa tools (search, outline, audit) instead of basic tools (exec, list_files).
+
+%s`, task, iteration+1, a.cfg.Agent.MaxIterations, context.String())
 
 	start := time.Now()
 	span := a.tracer.Start(nil, "agent.llm_plan", map[string]any{
 		"task_length": len(task),
+		"iteration":   iteration,
 	})
 
 	resp, err := a.llm.Chat(llm.ChatRequest{
@@ -133,6 +184,55 @@ IMPORTANT: For code search and analysis, use Lexa tools (search, outline, audit)
 	}
 
 	return toolCalls, nil
+}
+
+// checkCompletion uses LLM to determine if we should continue
+func (a *SmartAgent) checkCompletion(task string, results map[string]string, iteration int) (bool, error) {
+	// Build context from results
+	var context strings.Builder
+	for tool, result := range results {
+		// Truncate long results
+		truncated := result
+		if len(truncated) > 300 {
+			truncated = truncated[:300] + "..."
+		}
+		context.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", tool, truncated))
+	}
+	
+	prompt := fmt.Sprintf(`Task: %s
+
+Iteration: %d of %d
+
+Results so far:
+%s
+
+Based on the results, should I continue gathering information?
+Answer ONLY "yes" or "no".
+- "yes" if more information is needed
+- "no" if I have enough to provide a comprehensive answer`, 
+		task, iteration+1, a.cfg.Agent.MaxIterations, context.String())
+
+	resp, err := a.llm.Chat(llm.ChatRequest{
+		Messages: []llm.Message{
+			{Role: "user", Content: prompt},
+		},
+		MaxTokens: 10,
+		Model:     a.cfg.LLM.Model,
+	})
+
+	if err != nil {
+		// On error, assume done
+		return true, nil
+	}
+
+	response := strings.TrimSpace(strings.ToLower(resp.Content))
+	
+	// Check if response contains "no"
+	if strings.Contains(response, "no") {
+		return true, nil
+	}
+	
+	return false, nil
 }
 
 // executeTools executes all tool calls
