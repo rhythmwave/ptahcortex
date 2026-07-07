@@ -327,21 +327,41 @@ func (a *SmartAgent) analyze(task string, results map[string]string) (string, er
 		context.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", tool, result))
 	}
 
-	prompt := fmt.Sprintf(`You are a code analyst. Analyze the following results and provide a comprehensive report.
+	prompt := fmt.Sprintf(`You are a senior security auditor. Analyze the following code for security vulnerabilities.
 
 TASK: %s
 
-RESULTS:
+CODE RESULTS:
 %s
 
-Provide:
-1. Summary of findings
-2. Specific issues with file paths and line numbers
-3. Severity ratings (High/Medium/Low)
-4. Recommendations for fixes
-5. Code patches in diff format (if applicable)
+CRITICAL SECURITY CHECKS:
+1. JWT/Token Security:
+   - Token in URL query parameters (Critical)
+   - Weak/default JWT secrets (Critical)
+   - No algorithm restriction (Critical)
+   - Token storage in localStorage (High)
+   - No token revocation (High)
 
-Be concise but thorough.`, task, context.String())
+2. OAuth2 Security:
+   - CSRF via missing state validation (High)
+   - Open redirect via unvalidated redirect_uri (High)
+   - Insecure token storage (High)
+
+3. CORS/Headers:
+   - CORS reflects any origin with credentials (Critical)
+   - Missing security headers (Medium)
+
+4. Session Management:
+   - Session fixation (High)
+   - Insecure session storage (High)
+
+For EACH issue found:
+- File path and exact line numbers
+- Severity rating (Critical/High/Medium/Low)
+- Attack vector explanation
+- Code patch to fix
+
+Be thorough. Find ALL critical vulnerabilities.`, task, context.String())
 
 	start := time.Now()
 	span := a.tracer.Start(nil, "agent.llm_analyze", map[string]any{
