@@ -3,7 +3,7 @@ package agent
 import (
 	"fmt"
 	"log"
-	"strings"
+	"os"
 	"time"
 
 	"github.com/rhythmwave/ptahcortex/internal/config"
@@ -131,11 +131,4 @@ Be concise but thorough.`, task, aggregated)
 	log.Printf("[auto-agent] LLM analysis: %d tokens, %v", totalTokens, duration)
 
 	return resp.Content, nil
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

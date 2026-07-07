@@ -35,8 +35,13 @@ func (e *Executor) ExecuteTask(task string) *ExecutionResult {
 	results := make(map[string]string)
 	for _, call := range mapping.ToolCalls {
 		log.Printf("[auto] executing: %s %v", call.Tool, call.Args)
-		result := e.mcp.Call(call.Tool, call.Args)
-		results[call.Tool+":"+fmt.Sprintf("%v", call.Args)] = result
+		result, err := e.mcp.CallTool(call.Tool, call.Args)
+		if err != nil {
+			log.Printf("[auto] error: %v", err)
+			results[call.Tool+":"+fmt.Sprintf("%v", call.Args)] = fmt.Sprintf("Error: %v", err)
+		} else {
+			results[call.Tool+":"+fmt.Sprintf("%v", call.Args)] = result.Content
+		}
 	}
 
 	// 3. Aggregate results
