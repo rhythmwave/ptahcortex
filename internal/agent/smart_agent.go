@@ -122,40 +122,56 @@ Include 5-10 relevant searches.`, task)
 // parseMarkdownResponse parses LLM markdown response into tool calls
 func (a *SmartAgent) parseMarkdownResponse(response string) []string {
 	var queries []string
+	seen := make(map[string]bool) // deduplicate
 	
-	// Pattern 1: - search: <query>
-	// Pattern 2: - outline: <path>
-	// Pattern 3: - read: <path>
-	// Pattern 4: - audit
-	searchPattern := regexp.MustCompile(`(?i)^-?\s*(search|outline|read|audit|callers|trace_deps)\s*:\s*(.+)`)
+	// Match tool calls in backticks or plain text
+	// Formats:
+	//   `search: <query>`
+	//   search: <query>
+	//   - search: <query>
+	toolPattern := regexp.MustCompile(`(?i)(search|outline|read|audit|callers|trace_deps)\s*:\s*['"]?([^'"\n\]]+)['"]?`)
 	
-	lines := strings.Split(response, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	matches := toolPattern.FindAllStringSubmatch(response, -1)
+	
+	for _, match := range matches {
+		tool := strings.ToLower(match[1])
+		args := strings.TrimSpace(match[2])
+		
+		// Skip explanation text
+		if strings.Contains(args, "*") || 
+		   strings.Contains(args, "**") ||
+		   strings.Contains(args, "<") ||
+		   len(args) < 2 {
 			continue
 		}
 		
-		matches := searchPattern.FindStringSubmatch(line)
-		if matches != nil {
-			tool := strings.ToLower(matches[1])
-			args := strings.TrimSpace(matches[2])
-			
-			// Map tool names
-			switch tool {
-			case "search":
-				queries = append(queries, "text_search:"+args)
-			case "outline":
-				queries = append(queries, "outline:"+args)
-			case "read":
-				queries = append(queries, "read:"+args)
-			case "audit":
-				queries = append(queries, "audit:")
-			case "callers":
-				queries = append(queries, "callers:"+args)
-			case "trace_deps":
-				queries = append(queries, "trace_deps:"+args)
-			}
+		var query string
+		// Clean up args - remove extra text after pipe or backtick
+		if idx := strings.IndexAny(args, "|`\""); idx > 0 {
+			args = strings.TrimSpace(args[:idx])
+		}
+		// Remove trailing punctuation
+		args = strings.TrimRight(args, ".),;")
+		
+		switch tool {
+		case "search":
+			query = "text_search:" + args
+		case "outline":
+			query = "outline:" + args
+		case "read":
+			query = "read:" + args
+		case "audit":
+			query = "audit:"
+		case "callers":
+			query = "callers:" + args
+		case "trace_deps":
+			query = "trace_deps:" + args
+		}
+		
+		// Deduplicate
+		if query != "" && !seen[query] {
+			seen[query] = true
+			queries = append(queries, query)
 		}
 	}
 	
