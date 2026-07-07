@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -77,19 +78,15 @@ func (a *SmartAgent) Run(task string) (string, error) {
 
 // planSearches uses LLM to plan what to search
 func (a *SmartAgent) planSearches(task string) ([]string, error) {
-	prompt := fmt.Sprintf(`Generate search queries for this task. Return ONLY queries in format tool:query, one per line.
+	prompt := fmt.Sprintf(`I need to search a codebase for this task: %s
 
-Task: %s
+What searches should I run? List them as:
+- search: <query>
+- outline: <path>
+- read: <path>
+- audit
 
-Format:
-text_search:keyword
-outline:path
-read:path
-callers:functionname
-trace_deps:path
-audit
-
-Return 5-10 queries. No explanations, no markdown.`, task)
+Include 5-10 relevant searches.`, task)
 
 	start := time.Now()
 	span := a.tracer.Start(nil, "agent.llm_plan", map[string]any{
@@ -116,55 +113,51 @@ Return 5-10 queries. No explanations, no markdown.`, task)
 
 	log.Printf("[smart-agent] LLM plan: %d tokens, %v", totalTokens, duration)
 
-	// Parse response into queries
-	queries := a.parseQueries(resp.Content)
+	// Parse markdown response into queries
+	queries := a.parseMarkdownResponse(resp.Content)
 	return queries, nil
 }
 
-// parseQueries parses LLM response into tool calls
-func (a *SmartAgent) parseQueries(response string) []string {
+// parseMarkdownResponse parses LLM markdown response into tool calls
+func (a *SmartAgent) parseMarkdownResponse(response string) []string {
 	var queries []string
+	
+	// Pattern 1: - search: <query>
+	// Pattern 2: - outline: <path>
+	// Pattern 3: - read: <path>
+	// Pattern 4: - audit
+	searchPattern := regexp.MustCompile(`(?i)^-?\s*(search|outline|read|audit|callers|trace_deps)\s*:\s*(.+)`)
+	
 	lines := strings.Split(response, "\n")
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-
-		// Skip markdown headers and empty lines
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// Try to extract tool:query from various formats
-		// Format 1: text_search:query
-		// Format 2: text_search query
-		// Format 3: `text_search query`
-		// Format 4: 1. text_search query
 		
-		// Remove markdown formatting
-		line = strings.Trim(line, "`")
-		line = strings.TrimPrefix(line, "- ")
-		line = strings.TrimPrefix(line, "* ")
-		
-		// Remove numbering like "1. " or "2. "
-		if len(line) > 2 && line[0] >= '0' && line[0] <= '9' && line[1] == '.' {
-			line = strings.TrimSpace(line[2:])
-		}
-		
-		// Check for tool:query format
-		if strings.Contains(line, ":") {
-			queries = append(queries, line)
-		} else if strings.Contains(line, " ") {
-			// Try to parse "tool query" format
-			parts := strings.SplitN(line, " ", 2)
-			if len(parts) == 2 {
-				queries = append(queries, parts[0]+":"+parts[1])
+		matches := searchPattern.FindStringSubmatch(line)
+		if matches != nil {
+			tool := strings.ToLower(matches[1])
+			args := strings.TrimSpace(matches[2])
+			
+			// Map tool names
+			switch tool {
+			case "search":
+				queries = append(queries, "text_search:"+args)
+			case "outline":
+				queries = append(queries, "outline:"+args)
+			case "read":
+				queries = append(queries, "read:"+args)
+			case "audit":
+				queries = append(queries, "audit:")
+			case "callers":
+				queries = append(queries, "callers:"+args)
+			case "trace_deps":
+				queries = append(queries, "trace_deps:"+args)
 			}
 		}
 	}
-
+	
 	return queries
 }
 
