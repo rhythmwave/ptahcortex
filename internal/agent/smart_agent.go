@@ -112,6 +112,7 @@ Include 5-10 relevant searches.`, task)
 	a.metrics.RecordLLMCall(a.llm.Name(), a.cfg.LLM.Model, duration, totalTokens)
 
 	log.Printf("[smart-agent] LLM plan: %d tokens, %v", totalTokens, duration)
+	log.Printf("[smart-agent] LLM response:\n%s", resp.Content)
 
 	// Parse markdown response into queries
 	queries := a.parseMarkdownResponse(resp.Content)
