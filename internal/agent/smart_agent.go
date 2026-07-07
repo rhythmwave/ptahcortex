@@ -1,9 +1,9 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"time"
 
@@ -78,15 +78,70 @@ func (a *SmartAgent) Run(task string) (string, error) {
 
 // planSearches uses LLM to plan what to search
 func (a *SmartAgent) planSearches(task string) ([]string, error) {
-	prompt := fmt.Sprintf(`I need to search a codebase for this task: %s
+	// Define tools for the LLM to use
+	tools := []llm.ToolDefinition{
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "search",
+				Description: "Search code patterns in the codebase",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "Search query",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "outline",
+				Description: "Get file structure",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{
+							"type":        "string",
+							"description": "File path",
+						},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "read",
+				Description: "Read file content",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{
+							"type":        "string",
+							"description": "File path",
+						},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "audit",
+				Description: "Run architecture audit",
+				Parameters:  map[string]any{},
+			},
+		},
+	}
 
-What searches should I run? List them as:
-- search: <query>
-- outline: <path>
-- read: <path>
-- audit
-
-Include 5-10 relevant searches.`, task)
+	prompt := fmt.Sprintf("I need to search a codebase for this task: %s\n\nWhat searches should I run? Use the provided tools.", task)
 
 	start := time.Now()
 	span := a.tracer.Start(nil, "agent.llm_plan", map[string]any{
@@ -97,6 +152,7 @@ Include 5-10 relevant searches.`, task)
 		Messages: []llm.Message{
 			{Role: "user", Content: prompt},
 		},
+		Tools:     tools,
 		MaxTokens: 500,
 		Model:     a.cfg.LLM.Model,
 	})
@@ -112,71 +168,36 @@ Include 5-10 relevant searches.`, task)
 	a.metrics.RecordLLMCall(a.llm.Name(), a.cfg.LLM.Model, duration, totalTokens)
 
 	log.Printf("[smart-agent] LLM plan: %d tokens, %v", totalTokens, duration)
-	log.Printf("[smart-agent] LLM response:\n%s", resp.Content)
 
-	// Parse markdown response into queries
-	queries := a.parseMarkdownResponse(resp.Content)
+	// Extract tool calls from response
+	var queries []string
+	for _, tc := range resp.ToolCalls {
+		var args map[string]any
+		json.Unmarshal([]byte(tc.Function.Arguments), &args)
+		
+		switch tc.Function.Name {
+		case "search":
+			if query, ok := args["query"].(string); ok {
+				queries = append(queries, "text_search:"+query)
+			}
+		case "outline":
+			if path, ok := args["path"].(string); ok {
+				queries = append(queries, "outline:"+path)
+			}
+		case "read":
+			if path, ok := args["path"].(string); ok {
+				queries = append(queries, "read:"+path)
+			}
+		case "audit":
+			queries = append(queries, "audit:")
+		}
+	}
+	
 	return queries, nil
 }
 
 // parseMarkdownResponse parses LLM markdown response into tool calls
-func (a *SmartAgent) parseMarkdownResponse(response string) []string {
-	var queries []string
-	seen := make(map[string]bool) // deduplicate
-	
-	// Match tool calls in backticks or plain text
-	// Formats:
-	//   `search: <query>`
-	//   search: <query>
-	//   - search: <query>
-	toolPattern := regexp.MustCompile(`(?i)(search|outline|read|audit|callers|trace_deps)\s*:\s*['"]?([^'"\n\]]+)['"]?`)
-	
-	matches := toolPattern.FindAllStringSubmatch(response, -1)
-	
-	for _, match := range matches {
-		tool := strings.ToLower(match[1])
-		args := strings.TrimSpace(match[2])
-		
-		// Skip explanation text
-		if strings.Contains(args, "*") || 
-		   strings.Contains(args, "**") ||
-		   strings.Contains(args, "<") ||
-		   len(args) < 2 {
-			continue
-		}
-		
-		var query string
-		// Clean up args - remove extra text after pipe or backtick
-		if idx := strings.IndexAny(args, "|`\""); idx > 0 {
-			args = strings.TrimSpace(args[:idx])
-		}
-		// Remove trailing punctuation
-		args = strings.TrimRight(args, ".),;")
-		
-		switch tool {
-		case "search":
-			query = "text_search:" + args
-		case "outline":
-			query = "outline:" + args
-		case "read":
-			query = "read:" + args
-		case "audit":
-			query = "audit:"
-		case "callers":
-			query = "callers:" + args
-		case "trace_deps":
-			query = "trace_deps:" + args
-		}
-		
-		// Deduplicate
-		if query != "" && !seen[query] {
-			seen[query] = true
-			queries = append(queries, query)
-		}
-	}
-	
-	return queries
-}
+// Tool calling is now handled natively by the LLM API
 
 // executeSearches executes all searches via Lexa
 func (a *SmartAgent) executeSearches(queries []string) map[string]string {
