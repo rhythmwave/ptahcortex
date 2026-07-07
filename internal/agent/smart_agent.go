@@ -90,7 +90,9 @@ func (a *SmartAgent) plan(task string) ([]ToolCall, error) {
 	prompt := fmt.Sprintf(`I need to complete this task: %s
 
 Use the available tools to accomplish this task.
-You can use multiple tools in sequence.`, task)
+You can use multiple tools in sequence.
+
+IMPORTANT: For code search and analysis, use Lexa tools (search, outline, audit) instead of basic tools (exec, list_files).`, task)
 
 	start := time.Now()
 	span := a.tracer.Start(nil, "agent.llm_plan", map[string]any{
@@ -349,20 +351,20 @@ func (a *SmartAgent) buildToolDefinitions() []llm.ToolDefinition {
 		},
 	)
 
-	// Lexa tools (optional)
+	// Lexa tools (optional) - code intelligence
 	if a.useLexa {
 		tools = append(tools,
 			llm.ToolDefinition{
 				Type: "function",
 				Function: llm.ToolFunction{
 					Name:        "search",
-					Description: "Search code patterns in the codebase",
+					Description: "PREFERRED for code search. Use this instead of exec for finding code patterns. Returns relevant code snippets with context. Example: search('oauth') finds OAuth-related code.",
 					Parameters: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"query": map[string]any{
 								"type":        "string",
-								"description": "Search query",
+								"description": "Search query (e.g., 'oauth', 'token', 'race condition')",
 							},
 						},
 						"required": []string{"query"},
@@ -373,13 +375,13 @@ func (a *SmartAgent) buildToolDefinitions() []llm.ToolDefinition {
 				Type: "function",
 				Function: llm.ToolFunction{
 					Name:        "outline",
-					Description: "Get file structure",
+					Description: "PREFERRED for file structure. Use this instead of exec or list_files for understanding code structure. Returns file structure and symbols. Example: outline('internal/auth') shows auth module structure.",
 					Parameters: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"path": map[string]any{
 								"type":        "string",
-								"description": "File path",
+								"description": "File path (e.g., 'internal/auth/oauth.go')",
 							},
 						},
 						"required": []string{"path"},
@@ -390,7 +392,7 @@ func (a *SmartAgent) buildToolDefinitions() []llm.ToolDefinition {
 				Type: "function",
 				Function: llm.ToolFunction{
 					Name:        "audit",
-					Description: "Run architecture audit",
+					Description: "USE THIS FOR CODE REVIEW. Runs architecture audit using Lexa intelligence. Finds code smells, large functions, dependency issues.",
 					Parameters:  map[string]any{},
 				},
 			},
