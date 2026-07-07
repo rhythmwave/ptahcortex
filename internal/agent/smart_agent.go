@@ -11,25 +11,30 @@ import (
 	"github.com/rhythmwave/ptahcortex/internal/llm"
 	"github.com/rhythmwave/ptahcortex/internal/mcp"
 	"github.com/rhythmwave/ptahcortex/internal/otel"
+	"github.com/rhythmwave/ptahcortex/internal/tools"
 )
 
 // SmartAgent uses LLM planning for intelligent tool selection
 type SmartAgent struct {
-	cfg     *config.Config
-	llm     llm.Provider
-	mcp     *mcp.Manager
-	tracer  *otel.Tracer
-	metrics *otel.Metrics
+	cfg      *config.Config
+	llm      llm.Provider
+	mcp      *mcp.Manager
+	basic    *tools.BasicTool
+	tracer   *otel.Tracer
+	metrics  *otel.Metrics
+	useLexa  bool
 }
 
 // NewSmartAgent creates a new smart agent
-func NewSmartAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Manager) *SmartAgent {
+func NewSmartAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Manager, useLexa bool) *SmartAgent {
 	return &SmartAgent{
 		cfg:     cfg,
 		llm:     provider,
 		mcp:     mcpManager,
+		basic:   tools.NewBasicTool(""),
 		tracer:  otel.NewTracer(true, cfg.Name),
 		metrics: otel.NewMetrics(true),
+		useLexa: useLexa,
 	}
 }
 
@@ -44,104 +49,48 @@ func (a *SmartAgent) Run(task string) (string, error) {
 
 	log.Printf("\n[smart-agent] ═══════════════════════════════════════")
 	log.Printf("[smart-agent] ║ TASK: %s", truncate(task, 60))
+	log.Printf("[smart-agent] ║ LEXA: %v", a.useLexa)
 	log.Printf("[smart-agent] ═══════════════════════════════════════")
 
-	// Step 1: LLM Plans what to search (1 call)
-	log.Printf("\n[smart-agent] Step 1: LLM planning searches")
-	queries, err := a.planSearches(task)
+	// Step 1: LLM Plans what to do (1 call)
+	log.Printf("\n[smart-agent] Step 1: LLM planning")
+	toolCalls, err := a.plan(task)
 	if err != nil {
-		return "", fmt.Errorf("plan searches: %w", err)
+		return "", fmt.Errorf("plan: %w", err)
 	}
-	log.Printf("[smart-agent] Planned %d searches", len(queries))
+	log.Printf("[smart-agent] Planned %d tool calls", len(toolCalls))
 
-	// Step 2: Execute ALL searches (Lexa, 0 tokens)
-	log.Printf("\n[smart-agent] Step 2: Executing searches")
-	results := a.executeSearches(queries)
-	log.Printf("[smart-agent] Executed %d searches", len(results))
+	// Step 2: Execute tools (0 tokens)
+	log.Printf("\n[smart-agent] Step 2: Executing tools")
+	results := a.executeTools(toolCalls)
+	log.Printf("[smart-agent] Executed %d tools", len(results))
 
 	// Step 3: LLM Analyzes results (1 call)
 	log.Printf("\n[smart-agent] Step 3: LLM analyzing results")
-	analysis, err := a.analyzeResults(task, results)
+	analysis, err := a.analyze(task, results)
 	if err != nil {
-		return "", fmt.Errorf("analyze results: %w", err)
+		return "", fmt.Errorf("analyze: %w", err)
 	}
 
 	duration := time.Since(start)
 	log.Printf("\n[smart-agent] ═══════════════════════════════════════")
 	log.Printf("[smart-agent] ║ COMPLETE")
 	log.Printf("[smart-agent] ║ duration: %v", duration)
-	log.Printf("[smart-agent] ║ searches: %d", len(queries))
+	log.Printf("[smart-agent] ║ tool calls: %d", len(toolCalls))
 	log.Printf("[smart-agent] ═══════════════════════════════════════")
 
 	return analysis, nil
 }
 
-// planSearches uses LLM to plan what to search
-func (a *SmartAgent) planSearches(task string) ([]string, error) {
-	// Define tools for the LLM to use
-	tools := []llm.ToolDefinition{
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "search",
-				Description: "Search code patterns in the codebase",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": "Search query",
-						},
-					},
-					"required": []string{"query"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "outline",
-				Description: "Get file structure",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "File path",
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "read",
-				Description: "Read file content",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "File path",
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "audit",
-				Description: "Run architecture audit",
-				Parameters:  map[string]any{},
-			},
-		},
-	}
+// plan uses LLM to plan what tools to use
+func (a *SmartAgent) plan(task string) ([]ToolCall, error) {
+	// Build available tools
+	toolsList := a.buildToolDefinitions()
+	
+	prompt := fmt.Sprintf(`I need to complete this task: %s
 
-	prompt := fmt.Sprintf("I need to search a codebase for this task: %s\n\nWhat searches should I run? Use the provided tools.", task)
+Use the available tools to accomplish this task.
+You can use multiple tools in sequence.`, task)
 
 	start := time.Now()
 	span := a.tracer.Start(nil, "agent.llm_plan", map[string]any{
@@ -152,8 +101,8 @@ func (a *SmartAgent) planSearches(task string) ([]string, error) {
 		Messages: []llm.Message{
 			{Role: "user", Content: prompt},
 		},
-		Tools:     tools,
-		MaxTokens: 500,
+		Tools:     toolsList,
+		MaxTokens: 1000,
 		Model:     a.cfg.LLM.Model,
 	})
 
@@ -170,142 +119,117 @@ func (a *SmartAgent) planSearches(task string) ([]string, error) {
 	log.Printf("[smart-agent] LLM plan: %d tokens, %v", totalTokens, duration)
 
 	// Extract tool calls from response
-	var queries []string
+	var toolCalls []ToolCall
 	for _, tc := range resp.ToolCalls {
 		var args map[string]any
 		json.Unmarshal([]byte(tc.Function.Arguments), &args)
 		
-		switch tc.Function.Name {
-		case "search":
-			if query, ok := args["query"].(string); ok {
-				queries = append(queries, "text_search:"+query)
-			}
-		case "outline":
-			if path, ok := args["path"].(string); ok {
-				queries = append(queries, "outline:"+path)
-			}
-		case "read":
-			if path, ok := args["path"].(string); ok {
-				queries = append(queries, "read:"+path)
-			}
-		case "audit":
-			queries = append(queries, "audit:")
-		}
+		toolCalls = append(toolCalls, ToolCall{
+			Tool: tc.Function.Name,
+			Args: args,
+		})
 	}
-	
-	return queries, nil
+
+	return toolCalls, nil
 }
 
-// parseMarkdownResponse parses LLM markdown response into tool calls
-// Tool calling is now handled natively by the LLM API
-
-// executeSearches executes all searches via Lexa
-func (a *SmartAgent) executeSearches(queries []string) map[string]string {
+// executeTools executes all tool calls
+func (a *SmartAgent) executeTools(toolCalls []ToolCall) map[string]string {
 	results := make(map[string]string)
 
-	for _, query := range queries {
-		parts := strings.SplitN(query, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		tool := parts[0]
-		args := parts[1]
-
-		log.Printf("[smart-agent] executing: %s %s", tool, args)
-
+	for _, tc := range toolCalls {
+		log.Printf("[smart-agent] executing: %s %v", tc.Tool, tc.Args)
+		
 		var result string
 		var err error
 
-		switch tool {
-		case "text_search":
-			r, e := a.mcp.CallTool("text_search", map[string]any{
-				"query": args,
-			})
-			if e != nil {
-				err = e
+		switch tc.Tool {
+		// Basic OS tools
+		case "read_file":
+			path, _ := tc.Args["path"].(string)
+			result, err = a.basic.ReadFile(path)
+		case "write_file":
+			path, _ := tc.Args["path"].(string)
+			content, _ := tc.Args["content"].(string)
+			err = a.basic.WriteFile(path, content)
+			if err == nil {
+				result = "File written successfully"
+			}
+		case "exec":
+			command, _ := tc.Args["command"].(string)
+			result, err = a.basic.Exec(command)
+		case "list_files":
+			path, _ := tc.Args["path"].(string)
+			result, err = a.basic.ListFiles(path)
+		
+		// Lexa tools (optional)
+		case "search":
+			if a.useLexa {
+				query, _ := tc.Args["query"].(string)
+				r, e := a.mcp.CallTool("text_search", map[string]any{"query": query})
+				if e != nil {
+					err = e
+				} else {
+					result = r.Content
+				}
 			} else {
-				result = r.Content
+				// Fallback to basic search
+				query, _ := tc.Args["query"].(string)
+				result, err = a.basic.Exec(fmt.Sprintf("grep -r %s .", query))
 			}
 		case "outline":
-			r, e := a.mcp.CallTool("outline", map[string]any{
-				"path": args,
-			})
-			if e != nil {
-				err = e
+			if a.useLexa {
+				path, _ := tc.Args["path"].(string)
+				r, e := a.mcp.CallTool("outline", map[string]any{"path": path})
+				if e != nil {
+					err = e
+				} else {
+					result = r.Content
+				}
 			} else {
-				result = r.Content
-			}
-		case "read":
-			r, e := a.mcp.CallTool("read", map[string]any{
-				"path": args,
-			})
-			if e != nil {
-				err = e
-			} else {
-				result = r.Content
-			}
-		case "callers":
-			r, e := a.mcp.CallTool("callers", map[string]any{
-				"name": args,
-			})
-			if e != nil {
-				err = e
-			} else {
-				result = r.Content
-			}
-		case "trace_deps":
-			r, e := a.mcp.CallTool("trace_deps", map[string]any{
-				"path": args,
-			})
-			if e != nil {
-				err = e
-			} else {
-				result = r.Content
+				// Fallback to basic outline
+				path, _ := tc.Args["path"].(string)
+				result, err = a.basic.Exec(fmt.Sprintf("head -50 %s", path))
 			}
 		case "audit":
-			r, e := a.mcp.CallTool("audit", map[string]any{})
-			if e != nil {
-				err = e
+			if a.useLexa {
+				r, e := a.mcp.CallTool("audit", map[string]any{})
+				if e != nil {
+					err = e
+				} else {
+					result = r.Content
+				}
 			} else {
-				result = r.Content
+				result = "Audit requires Lexa"
 			}
 		default:
-			// Try generic call
-			r, e := a.mcp.CallTool(tool, map[string]any{
-				"query": args,
-			})
-			if e != nil {
-				err = e
-			} else {
-				result = r.Content
-			}
+			err = fmt.Errorf("unknown tool: %s", tc.Tool)
 		}
 
 		if err != nil {
 			log.Printf("[smart-agent] error: %v", err)
-			results[query] = fmt.Sprintf("Error: %v", err)
+			results[tc.Tool] = fmt.Sprintf("Error: %v", err)
 		} else {
-			results[query] = result
+			results[tc.Tool] = result
 		}
 	}
 
 	return results
 }
 
-// analyzeResults uses LLM to analyze all search results
-func (a *SmartAgent) analyzeResults(task string, results map[string]string) (string, error) {
+// analyze uses LLM to analyze all results
+func (a *SmartAgent) analyze(task string, results map[string]string) (string, error) {
 	// Build context from all results
 	var context strings.Builder
-	for query, result := range results {
-		context.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", query, result))
+	for tool, result := range results {
+		context.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", tool, result))
 	}
 
-	prompt := fmt.Sprintf(`You are a code analyst. Analyze the following search results and provide a comprehensive report.
+	prompt := fmt.Sprintf(`You are a code analyst. Analyze the following results and provide a comprehensive report.
 
 TASK: %s
 
-SEARCH RESULTS:
+RESULTS:
 %s
 
 Provide:
@@ -321,7 +245,6 @@ Be concise but thorough.`, task, context.String())
 	span := a.tracer.Start(nil, "agent.llm_analyze", map[string]any{
 		"task_length":    len(task),
 		"results_length": context.Len(),
-		"results_count":  len(results),
 	})
 
 	resp, err := a.llm.Chat(llm.ChatRequest{
@@ -345,4 +268,140 @@ Be concise but thorough.`, task, context.String())
 	log.Printf("[smart-agent] LLM analyze: %d tokens, %v", totalTokens, duration)
 
 	return resp.Content, nil
+}
+
+// buildToolDefinitions builds tool definitions based on configuration
+func (a *SmartAgent) buildToolDefinitions() []llm.ToolDefinition {
+	var tools []llm.ToolDefinition
+
+	// Basic OS tools (always available)
+	tools = append(tools,
+		llm.ToolDefinition{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "read_file",
+				Description: "Read file contents",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{
+							"type":        "string",
+							"description": "File path",
+						},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		llm.ToolDefinition{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "write_file",
+				Description: "Write to a file",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{
+							"type":        "string",
+							"description": "File path",
+						},
+						"content": map[string]any{
+							"type":        "string",
+							"description": "File content",
+						},
+					},
+					"required": []string{"path", "content"},
+				},
+			},
+		},
+		llm.ToolDefinition{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "exec",
+				Description: "Execute a shell command",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"command": map[string]any{
+							"type":        "string",
+							"description": "Shell command to execute",
+						},
+					},
+					"required": []string{"command"},
+				},
+			},
+		},
+		llm.ToolDefinition{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "list_files",
+				Description: "List files in a directory",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{
+							"type":        "string",
+							"description": "Directory path",
+						},
+					},
+				},
+			},
+		},
+	)
+
+	// Lexa tools (optional)
+	if a.useLexa {
+		tools = append(tools,
+			llm.ToolDefinition{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        "search",
+					Description: "Search code patterns in the codebase",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"query": map[string]any{
+								"type":        "string",
+								"description": "Search query",
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+			},
+			llm.ToolDefinition{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        "outline",
+					Description: "Get file structure",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path": map[string]any{
+								"type":        "string",
+								"description": "File path",
+							},
+						},
+						"required": []string{"path"},
+					},
+				},
+			},
+			llm.ToolDefinition{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        "audit",
+					Description: "Run architecture audit",
+					Parameters:  map[string]any{},
+				},
+			},
+		)
+	}
+
+	return tools
+}
+
+// ToolCall represents a tool call from LLM
+type ToolCall struct {
+	Tool string
+	Args map[string]any
 }
