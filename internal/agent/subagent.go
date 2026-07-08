@@ -79,8 +79,12 @@ func (a *SmartAgent) Run(task string) (string, error) {
 	if a.isSub {
 		// Subagent: just execute tools directly, no sub-spawning
 		allResults = a.executeDirectly(task)
+	} else if isSimpleTask(task) {
+		// Simple task: execute directly without subagents
+		log.Printf("[agent] Simple task detected, skipping subagents")
+		allResults = a.executeDirectly(task)
 	} else {
-		// Main agent: plan subagents, spawn in parallel, analyze
+		// Complex task: plan subagents, spawn in parallel, analyze
 		subagentTasks, err := a.planSubagents(task)
 		if err != nil {
 			return "", fmt.Errorf("plan subagents: %w", err)
@@ -102,6 +106,21 @@ func (a *SmartAgent) Run(task string) (string, error) {
 	log.Printf("[agent] ═══════════════════════════════════════")
 
 	return analysis, nil
+}
+
+// isSimpleTask detects tasks that don't need subagents
+func isSimpleTask(task string) bool {
+	simple := []string{
+		"list", "find", "show", "read", "get",
+		"count", "check", "verify", "display",
+	}
+	taskLower := strings.ToLower(task)
+	for _, kw := range simple {
+		if strings.HasPrefix(taskLower, kw) {
+			return true
+		}
+	}
+	return len(strings.Fields(task)) <= 5
 }
 
 // executeDirectly runs tools without sub-spawning (for subagents)
