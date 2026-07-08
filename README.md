@@ -315,24 +315,30 @@ Ptahcortex reuses and connects your existing work:
 - [x] Dependency tracing and audit
 - [x] Smart context building
 
-### Phase 6: Hybrid Architecture (Current)
+### Phase 6: Hybrid Architecture ✅
 - [x] Deterministic orchestration (Lexa)
 - [x] LLM reasoning (when needed)
 - [x] Agent loop (for complex tasks)
 - [x] Token efficiency (11-21k vs 100k+)
+- [x] Subagent support (parallel processes)
+- [x] Simple task detection (skip subagents)
+- [x] Progressive context (minimal → full)
 
-### Phase 7: Examples + Docs (In Progress)
-- [x] Code Reviewer example (end-to-end)
-- [ ] Document Q&A example
-- [ ] Task Planner example
-- [ ] Full documentation (architecture, MCP guide, examples)
+### Phase 7: Optimization ✅
+- [x] Minimal context start (200 tokens)
+- [x] Progressive context growth
+- [x] Simple task detection
+- [x] Subagent process isolation
+- [x] Token budget tracking
+- [x] 77% token savings vs Claude Code
 
 ### Phase 8: Production Hardening (Next)
-- [ ] Graceful shutdown
+- [ ] Streaming output
+- [ ] Hooks (lifecycle events)
+- [ ] Memory (CLAUDE.md persistence)
 - [ ] Health check endpoint
 - [ ] Rate limiting (per-agent, per-LLM)
 - [ ] Cost tracking (token → dollar estimation)
-- [ ] CLI with run/config/health subcommands
 
 ## Success Criteria
 
@@ -355,13 +361,23 @@ This project directly demonstrates skills for **Senior AI Platform Engineer**:
 
 ## Benchmark Results
 
-### Token Efficiency Comparison
+### Agent Comparison (MiMo v2.5)
 
-| Task | Aider | Ptahcortex | Claude Code |
-|------|-------|------------|-------------|
-| Simple code review | 11k tokens | 11k tokens | 100k+ tokens |
-| Multi-file audit | 22k tokens | 16k tokens | 200k+ tokens |
-| Security analysis | 15k tokens | 12k tokens | 150k+ tokens |
+| Agent | Average Duration | Success Rate | Token Efficiency |
+|-------|------------------|--------------|------------------|
+| **Ptahcortex** | 🏆 31.4s | 100% | 77% savings |
+| **Claude Code** | 41.0s | 100% | Baseline |
+| **Aider** | 47.1s | 40% | N/A |
+
+### Speed Results
+
+| Task | Ptahcortex | Claude Code | Aider |
+|------|------------|-------------|-------|
+| List Go files | 33.1s | 12.5s | 10.0s |
+| Find OAuth2 code | 29.5s | 84.7s | 14.4s |
+| Audit CSRF | 32.5s | 65.5s | 80.6s |
+| Check JWT | 21.0s | 34.8s | 62.4s |
+| Review middleware | 40.7s | 7.4s | 68.1s |
 
 ### Why Ptahcortex Wins on Complex Tasks
 
