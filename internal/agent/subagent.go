@@ -35,26 +35,28 @@ type Subagent struct {
 
 // SmartAgent uses LLM planning with subagent support
 type SmartAgent struct {
-	cfg      *config.Config
-	llm      llm.Provider
-	mcp      *mcp.Manager
-	basic    *tools.BasicTool
-	tracer   *otel.Tracer
-	metrics  *otel.Metrics
-	useLexa  bool
-	isSub    bool // true if this is a subagent (no recursive spawning)
+	cfg       *config.Config
+	llm       llm.Provider
+	mcp       *mcp.Manager
+	basic     *tools.BasicTool
+	tracer    *otel.Tracer
+	metrics   *otel.Metrics
+	collector *otel.MetricsCollector
+	useLexa   bool
+	isSub     bool // true if this is a subagent (no recursive spawning)
 }
 
 // NewSmartAgent creates a new smart agent
 func NewSmartAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Manager, useLexa bool) *SmartAgent {
 	return &SmartAgent{
-		cfg:     cfg,
-		llm:     provider,
-		mcp:     mcpManager,
-		basic:   tools.NewBasicTool(""),
-		tracer:  otel.NewTracer(true, cfg.Name),
-		metrics: otel.NewMetrics(true),
-		useLexa: useLexa,
+		cfg:       cfg,
+		llm:       provider,
+		mcp:       mcpManager,
+		basic:     tools.NewBasicTool(""),
+		tracer:    otel.NewTracer(true, cfg.Name),
+		metrics:   otel.NewMetrics(true),
+		collector: otel.NewMetricsCollector(true, "/tmp/ptahcortex-metrics.jsonl"),
+		useLexa:   useLexa,
 	}
 }
 
@@ -75,6 +77,7 @@ func (a *SmartAgent) Run(task string) (string, error) {
 	log.Printf("[agent] ═══════════════════════════════════════")
 
 	var allResults map[string]string
+	var err error
 
 	if a.isSub {
 		// Subagent: just execute tools directly, no sub-spawning
@@ -101,6 +104,18 @@ func (a *SmartAgent) Run(task string) (string, error) {
 	}
 
 	duration := time.Since(start)
+	
+	// Record metrics
+	a.collector.RecordAgentRun(
+		"smart",
+		task,
+		duration,
+		len(analysis),
+		1,
+		err == nil,
+		func() string { if err != nil { return err.Error() }; return "" }(),
+	)
+	
 	log.Printf("\n[agent] ═══════════════════════════════════════")
 	log.Printf("[agent] ║ COMPLETE in %v", duration)
 	log.Printf("[agent] ═══════════════════════════════════════")

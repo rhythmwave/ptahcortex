@@ -7,20 +7,23 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rhythmwave/ptahcortex/internal/config"
 	"github.com/rhythmwave/ptahcortex/internal/llm"
 	"github.com/rhythmwave/ptahcortex/internal/mcp"
+	"github.com/rhythmwave/ptahcortex/internal/otel"
 	"github.com/rhythmwave/ptahcortex/internal/tools"
 )
 
 // InteractiveAgent maintains context across multiple user inputs
 type InteractiveAgent struct {
-	cfg      *config.Config
-	llm      llm.Provider
-	mcp      *mcp.Manager
-	basic    *tools.BasicTool
-	useLexa  bool
+	cfg       *config.Config
+	llm       llm.Provider
+	mcp       *mcp.Manager
+	basic     *tools.BasicTool
+	collector *otel.MetricsCollector
+	useLexa   bool
 	
 	// Conversation history
 	messages []llm.Message
@@ -37,6 +40,7 @@ func NewInteractiveAgent(cfg *config.Config, provider llm.Provider, mcpManager *
 		llm:             provider,
 		mcp:             mcpManager,
 		basic:           tools.NewBasicTool(""),
+		collector:       otel.NewMetricsCollector(true, "/tmp/ptahcortex-metrics.jsonl"),
 		useLexa:         useLexa,
 		messages:        []llm.Message{},
 		previousResults: make(map[string]string),
@@ -102,6 +106,8 @@ When the user asks you to:
 
 // processTurn handles a single user input with context from previous turns
 func (a *InteractiveAgent) processTurn(input string) (string, error) {
+	start := time.Now()
+	
 	// Build context from previous turns
 	context := a.buildContext()
 	
@@ -115,12 +121,25 @@ func (a *InteractiveAgent) processTurn(input string) (string, error) {
 	})
 	
 	// Call LLM with tools
+	llmStart := time.Now()
 	resp, err := a.llm.Chat(llm.ChatRequest{
 		Messages:   a.messages,
 		Tools:      a.buildTools(),
 		MaxTokens:  a.cfg.LLM.MaxTokens,
 		Model:      a.cfg.LLM.Model,
 	})
+	llmDuration := time.Since(llmStart)
+	
+	// Record LLM call metrics
+	a.collector.RecordLLMCall(
+		a.llm.Name(),
+		a.cfg.LLM.Model,
+		llmDuration,
+		resp.Usage.TotalTokens,
+		err == nil,
+		func() string { if err != nil { return err.Error() }; return "" }(),
+	)
+	
 	if err != nil {
 		return "", err
 	}
@@ -169,6 +188,17 @@ func (a *InteractiveAgent) processTurn(input string) (string, error) {
 		Role:    "assistant",
 		Content: resp.Content,
 	})
+	
+	// Record agent run metrics
+	a.collector.RecordAgentRun(
+		"interactive",
+		input,
+		time.Since(start),
+		resp.Usage.TotalTokens,
+		a.turnCount,
+		true,
+		"",
+	)
 	
 	// Store results for context
 	a.previousResults[fmt.Sprintf("turn_%d", a.turnCount)] = resp.Content
