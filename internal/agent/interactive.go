@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -40,7 +41,7 @@ func NewInteractiveAgent(cfg *config.Config, provider llm.Provider, mcpManager *
 		llm:             provider,
 		mcp:             mcpManager,
 		basic:           tools.NewBasicTool(""),
-		collector:       otel.NewMetricsCollector(true, "/tmp/ptahcortex-metrics.jsonl"),
+		collector:       otel.NewMetricsCollector(true, filepath.Join(os.TempDir(), "ptahcortex-metrics.jsonl")),
 		useLexa:         useLexa,
 		messages:        []llm.Message{},
 		previousResults: make(map[string]string),

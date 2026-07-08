@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -55,7 +56,7 @@ func NewSmartAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Ma
 		basic:     tools.NewBasicTool(""),
 		tracer:    otel.NewTracer(true, cfg.Name),
 		metrics:   otel.NewMetrics(true),
-		collector: otel.NewMetricsCollector(true, "/tmp/ptahcortex-metrics.jsonl"),
+		collector: otel.NewMetricsCollector(true, filepath.Join(os.TempDir(), "ptahcortex-metrics.jsonl")),
 		useLexa:   useLexa,
 	}
 }
@@ -246,7 +247,7 @@ func (a *SmartAgent) spawnSubagent(task Subagent) Subagent {
 	log.Printf("[subagent-%s] Starting: %s", task.ID, truncate(task.Task, 50))
 
 	// Create temp config with --subagent flag (no nested spawning)
-	configPath := fmt.Sprintf("/tmp/ptahcortex-sub-%s.yaml", task.ID)
+	configPath := filepath.Join(os.TempDir(), fmt.Sprintf("ptahcortex-sub-%s.yaml", task.ID))
 	if err := a.writeConfig(configPath, task); err != nil {
 		task.Error = err
 		task.Duration = time.Since(start)
@@ -258,7 +259,8 @@ func (a *SmartAgent) spawnSubagent(task Subagent) Subagent {
 	ctx, cancel := context.WithTimeout(context.Background(), subagentTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "/usr/local/bin/ptahcortex",
+	execPath, _ := os.Executable()
+	cmd := exec.CommandContext(ctx, execPath,
 		"--config", configPath,
 		"--subagent", // key: prevents recursive spawning
 		"--task", task.Task,

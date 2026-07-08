@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -52,7 +53,12 @@ func (t *BasicTool) WriteFile(path, content string) error {
 
 // Exec runs a shell command
 func (t *BasicTool) Exec(command string) (string, error) {
-	cmd := exec.Command("sh", "-c", command)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", command)
+	} else {
+		cmd = exec.Command("sh", "-c", command)
+	}
 	cmd.Dir = t.WorkDir
 	
 	output, err := cmd.CombinedOutput()
