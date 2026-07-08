@@ -127,41 +127,42 @@ func isSimpleTask(task string) bool {
 func (a *SmartAgent) executeDirectly(task string) map[string]string {
 	toolsList := a.buildTools()
 	results := make(map[string]string)
-
-	prompt := fmt.Sprintf(`Complete this task: %s
-
-Use the available tools to gather information.
-Return your findings when done.`, task)
-
-	// Single LLM call with tool execution
-	resp, err := a.llm.Chat(llm.ChatRequest{
-		Messages: []llm.Message{
-			{Role: "user", Content: prompt},
-		},
-		Tools:     toolsList,
-		MaxTokens: maxSubagentTokens,
-		Model:     a.cfg.LLM.Model,
-	})
-	if err != nil {
-		results["error"] = err.Error()
-		return results
-	}
-
-	// Execute tool calls
-	for _, tc := range resp.ToolCalls {
-		var args map[string]any
-		json.Unmarshal([]byte(tc.Function.Arguments), &args)
-		result, err := a.executeTool(tc.Function.Name, args)
+	cm := NewContextManager(maxSubagentTokens)
+	
+	// Iterative execution with growing context
+	for iteration := 0; iteration < 3; iteration++ {
+		prompt := cm.GetProgressivePrompt(task, iteration, results)
+		
+		resp, err := a.llm.Chat(llm.ChatRequest{
+			Messages: []llm.Message{
+				{Role: "user", Content: prompt},
+			},
+			Tools:     toolsList,
+			MaxTokens: maxSubagentTokens / 3,
+			Model:     a.cfg.LLM.Model,
+		})
 		if err != nil {
-			results[tc.Function.Name] = fmt.Sprintf("Error: %v", err)
-		} else {
-			results[tc.Function.Name] = result
+			results["error"] = err.Error()
+			break
 		}
-	}
 
-	// If no tool calls, use response as result
-	if len(resp.ToolCalls) == 0 {
-		results["analysis"] = resp.Content
+		// Execute tool calls
+		for _, tc := range resp.ToolCalls {
+			var args map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			result, err := a.executeTool(tc.Function.Name, args)
+			if err != nil {
+				results[tc.Function.Name] = fmt.Sprintf("Error: %v", err)
+			} else {
+				results[tc.Function.Name] = result
+			}
+		}
+
+		// If no tool calls, we're done
+		if len(resp.ToolCalls) == 0 {
+			results["analysis"] = resp.Content
+			break
+		}
 	}
 
 	return results
