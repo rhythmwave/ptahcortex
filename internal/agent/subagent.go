@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,7 @@ type Subagent struct {
 	Results  map[string]string
 	Error    error
 	Duration time.Duration
+	Output   string
 }
 
 // SmartAgent uses LLM planning for intelligent tool selection
@@ -48,7 +51,7 @@ func NewSmartAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Ma
 	}
 }
 
-// Run executes the agent with subagent support
+// Run executes the agent with parallel subagent spawning
 func (a *SmartAgent) Run(task string) (string, error) {
 	start := time.Now()
 	runSpan := a.tracer.Start(nil, "agent.run", map[string]any{
@@ -71,9 +74,9 @@ func (a *SmartAgent) Run(task string) (string, error) {
 	}
 	log.Printf("[smart-agent] Planned %d subagent tasks", len(subagentTasks))
 
-	// Step 2: Execute subagents in parallel
-	log.Printf("\n[smart-agent] Step 2: Executing subagents in parallel")
-	subagentResults := a.executeSubagents(subagentTasks)
+	// Step 2: Spawn parallel subagent processes
+	log.Printf("\n[smart-agent] Step 2: Spawning parallel subagent processes")
+	subagentResults := a.spawnParallelSubagents(subagentTasks)
 	log.Printf("[smart-agent] Completed %d subagents", len(subagentResults))
 
 	// Step 3: Aggregate results
@@ -137,8 +140,8 @@ Return ONLY the JSON array, no other text.`, task)
 	return subagentTasks, nil
 }
 
-// executeSubagents executes subagents in parallel
-func (a *SmartAgent) executeSubagents(tasks []Subagent) []Subagent {
+// spawnParallelSubagents spawns independent processes for each subagent
+func (a *SmartAgent) spawnParallelSubagents(tasks []Subagent) []Subagent {
 	var wg sync.WaitGroup
 	results := make([]Subagent, len(tasks))
 
@@ -146,7 +149,7 @@ func (a *SmartAgent) executeSubagents(tasks []Subagent) []Subagent {
 		wg.Add(1)
 		go func(idx int, t Subagent) {
 			defer wg.Done()
-			results[idx] = a.executeSubagent(t)
+			results[idx] = a.spawnSubagentProcess(t)
 		}(i, task)
 	}
 
@@ -154,117 +157,88 @@ func (a *SmartAgent) executeSubagents(tasks []Subagent) []Subagent {
 	return results
 }
 
-// executeSubagent executes a single subagent
-func (a *SmartAgent) executeSubagent(task Subagent) Subagent {
+// spawnSubagentProcess spawns an independent process for a subagent
+func (a *SmartAgent) spawnSubagentProcess(task Subagent) Subagent {
 	start := time.Now()
-	
-	log.Printf("[subagent-%s] Starting: %s", task.ID, task.Task)
-	
-	// Build tools for subagent (minimal context)
-	toolsList := a.buildSubagentTools()
-	
-	prompt := fmt.Sprintf(`Complete this task: %s
 
-Use the available tools to gather information.
-Return the results as JSON:
-{
-  "findings": ["finding1", "finding2"],
-  "files": ["file1.go", "file2.go"],
-  "issues": [{"severity": "high", "description": "issue1"}]
-}`, task.Task)
+	log.Printf("[subagent-%s] Spawning process: %s", task.ID, task.Task)
 
-	resp, err := a.llm.Chat(llm.ChatRequest{
-		Messages: []llm.Message{
-			{Role: "user", Content: prompt},
-		},
-		Tools:     toolsList,
-		MaxTokens: 1000,
-		Model:     a.cfg.LLM.Model,
-	})
+	// Create temporary config for subagent
+	configPath := fmt.Sprintf("/tmp/ptahcortex-subagent-%s.yaml", task.ID)
+	if err := a.createSubagentConfig(configPath, task); err != nil {
+		task.Error = err
+		task.Duration = time.Since(start)
+		log.Printf("[subagent-%s] Error creating config: %v", task.ID, err)
+		return task
+	}
+	defer os.Remove(configPath)
 
+	// Spawn independent process
+	cmd := exec.Command("/usr/local/bin/ptahcortex",
+		"--config", configPath,
+		"--smart",
+		"--task", task.Task,
+	)
+
+	// Capture output
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		task.Error = err
+		task.Output = string(output)
 		task.Duration = time.Since(start)
 		log.Printf("[subagent-%s] Error: %v", task.ID, err)
 		return task
 	}
 
-	// Execute tool calls
-	results := make(map[string]string)
-	for _, tc := range resp.ToolCalls {
-		var args map[string]any
-		json.Unmarshal([]byte(tc.Function.Arguments), &args)
-		
-		result, err := a.executeTool(tc.Function.Name, args)
-		if err != nil {
-			results[tc.Function.Name] = fmt.Sprintf("Error: %v", err)
-		} else {
-			results[tc.Function.Name] = result
-		}
-	}
-
-	task.Results = results
+	task.Output = string(output)
 	task.Duration = time.Since(start)
-	
+
 	log.Printf("[subagent-%s] Completed in %v", task.ID, task.Duration)
 	return task
 }
 
-// executeTool executes a single tool
-func (a *SmartAgent) executeTool(name string, args map[string]any) (string, error) {
-	switch name {
-	case "read_file":
-		path, _ := args["path"].(string)
-		return a.basic.ReadFile(path)
-	case "exec":
-		command, _ := args["command"].(string)
-		return a.basic.Exec(command)
-	case "list_files":
-		path, _ := args["path"].(string)
-		return a.basic.ListFiles(path)
-	case "search":
-		if a.useLexa {
-			query, _ := args["query"].(string)
-			r, err := a.mcp.CallTool("text_search", map[string]any{"query": query})
-			if err != nil {
-				return "", err
-			}
-			return r.Content, nil
-		}
-		query, _ := args["query"].(string)
-		return a.basic.Exec(fmt.Sprintf("grep -r %s .", query))
-	case "outline":
-		if a.useLexa {
-			path, _ := args["path"].(string)
-			r, err := a.mcp.CallTool("outline", map[string]any{"path": path})
-			if err != nil {
-				return "", err
-			}
-			return r.Content, nil
-		}
-		path, _ := args["path"].(string)
-		return a.basic.Exec(fmt.Sprintf("head -50 %s", path))
-	default:
-		return "", fmt.Errorf("unknown tool: %s", name)
-	}
+// createSubagentConfig creates a temporary config for a subagent
+func (a *SmartAgent) createSubagentConfig(configPath string, task Subagent) error {
+	// Escape task description for YAML
+	escapedTask := strings.ReplaceAll(task.Task, "'", "''")
+	escapedTask = strings.ReplaceAll(escapedTask, "\n", " ")
+	
+	config := fmt.Sprintf(`name: subagent-%s
+description: "Subagent for: %s"
+
+llm:
+  provider: openai
+  model: mimo-v2.5
+  base_url: https://token-plan-sgp.xiaomimimo.com
+  api_key: tp-s7emr8e5k8enrm5jnz2gs82d3hvhoq22vvt0sw110sipuhfm
+  max_tokens: 4096
+
+tools:
+  max_parallel: 3
+  timeout: 30s
+
+agent:
+  max_iterations: 3
+  max_tokens_per_run: 20000
+`, task.ID, escapedTask)
+
+	return os.WriteFile(configPath, []byte(config), 0644)
 }
 
 // aggregateResults aggregates results from all subagents
 func (a *SmartAgent) aggregateResults(subagents []Subagent) map[string]string {
 	allResults := make(map[string]string)
-	
+
 	for _, sub := range subagents {
 		if sub.Error != nil {
 			allResults[fmt.Sprintf("subagent-%s-error", sub.ID)] = sub.Error.Error()
 			continue
 		}
-		
-		for tool, result := range sub.Results {
-			key := fmt.Sprintf("subagent-%s-%s", sub.ID, tool)
-			allResults[key] = result
-		}
+
+		// Parse output for findings
+		allResults[fmt.Sprintf("subagent-%s-output", sub.ID)] = sub.Output
 	}
-	
+
 	return allResults
 }
 
@@ -285,7 +259,7 @@ func (a *SmartAgent) analyze(task string, results map[string]string) (string, er
 
 TASK: %s
 
-CODE RESULTS:
+SUBAGENT RESULTS:
 %s
 
 CRITICAL SECURITY CHECKS:
@@ -330,107 +304,6 @@ Be thorough. Find ALL critical vulnerabilities.`, task, context.String())
 	}
 
 	return resp.Content, nil
-}
-
-// buildSubagentTools builds tools for subagent (minimal context)
-func (a *SmartAgent) buildSubagentTools() []llm.ToolDefinition {
-	var tools []llm.ToolDefinition
-
-	// Basic tools for subagent
-	tools = append(tools,
-		llm.ToolDefinition{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "read_file",
-				Description: "Read file contents",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "File path",
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-		},
-		llm.ToolDefinition{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "exec",
-				Description: "Execute a shell command",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"command": map[string]any{
-							"type":        "string",
-							"description": "Shell command to execute",
-						},
-					},
-					"required": []string{"command"},
-				},
-			},
-		},
-		llm.ToolDefinition{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        "list_files",
-				Description: "List files in a directory",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "Directory path",
-						},
-					},
-				},
-			},
-		},
-	)
-
-	// Add Lexa tools if available
-	if a.useLexa {
-		tools = append(tools,
-			llm.ToolDefinition{
-				Type: "function",
-				Function: llm.ToolFunction{
-					Name:        "search",
-					Description: "Search code patterns",
-					Parameters: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"query": map[string]any{
-								"type":        "string",
-								"description": "Search query",
-							},
-						},
-						"required": []string{"query"},
-					},
-				},
-			},
-			llm.ToolDefinition{
-				Type: "function",
-				Function: llm.ToolFunction{
-					Name:        "outline",
-					Description: "Get file structure",
-					Parameters: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"path": map[string]any{
-								"type":        "string",
-								"description": "File path",
-							},
-						},
-						"required": []string{"path"},
-					},
-				},
-			},
-		)
-	}
-
-	return tools
 }
 
 // truncate is defined in agent.go
