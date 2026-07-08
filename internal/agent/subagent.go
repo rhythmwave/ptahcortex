@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,17 +18,22 @@ import (
 	"github.com/rhythmwave/ptahcortex/internal/tools"
 )
 
-// Subagent represents a subagent for parallel execution
+const (
+	maxSubagents      = 3
+	subagentTimeout   = 60 * time.Second
+	maxSubagentTokens = 4096
+)
+
+// Subagent represents a subagent task
 type Subagent struct {
 	ID       string
 	Task     string
-	Results  map[string]string
+	Output   string
 	Error    error
 	Duration time.Duration
-	Output   string
 }
 
-// SmartAgent uses LLM planning for intelligent tool selection
+// SmartAgent uses LLM planning with subagent support
 type SmartAgent struct {
 	cfg      *config.Config
 	llm      llm.Provider
@@ -36,6 +42,7 @@ type SmartAgent struct {
 	tracer   *otel.Tracer
 	metrics  *otel.Metrics
 	useLexa  bool
+	isSub    bool // true if this is a subagent (no recursive spawning)
 }
 
 // NewSmartAgent creates a new smart agent
@@ -51,105 +58,146 @@ func NewSmartAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Ma
 	}
 }
 
-// Run executes the agent with parallel subagent spawning
+// NewSubAgent creates a subagent that won't spawn nested subagents
+func NewSubAgent(cfg *config.Config, provider llm.Provider, mcpManager *mcp.Manager, useLexa bool) *SmartAgent {
+	a := NewSmartAgent(cfg, provider, mcpManager, useLexa)
+	a.isSub = true
+	return a
+}
+
+// Run executes the agent
 func (a *SmartAgent) Run(task string) (string, error) {
 	start := time.Now()
-	runSpan := a.tracer.Start(nil, "agent.run", map[string]any{
-		"agent": a.cfg.Name,
-		"task":  task,
-	})
-	defer runSpan.End()
 
-	log.Printf("\n[smart-agent] ═══════════════════════════════════════")
-	log.Printf("[smart-agent] ║ TASK: %s", truncate(task, 60))
-	log.Printf("[smart-agent] ║ LEXA: %v", a.useLexa)
-	log.Printf("[smart-agent] ║ MAX ITERATIONS: %d", a.cfg.Agent.MaxIterations)
-	log.Printf("[smart-agent] ═══════════════════════════════════════")
+	log.Printf("\n[agent] ═══════════════════════════════════════")
+	log.Printf("[agent] ║ TASK: %s", truncate(task, 60))
+	log.Printf("[agent] ║ SUBAGENT: %v", a.isSub)
+	log.Printf("[agent] ═══════════════════════════════════════")
 
-	// Step 1: Plan subagent tasks
-	log.Printf("\n[smart-agent] Step 1: Planning subagent tasks")
-	subagentTasks, err := a.planSubagents(task)
-	if err != nil {
-		return "", fmt.Errorf("plan subagents: %w", err)
+	var allResults map[string]string
+
+	if a.isSub {
+		// Subagent: just execute tools directly, no sub-spawning
+		allResults = a.executeDirectly(task)
+	} else {
+		// Main agent: plan subagents, spawn in parallel, analyze
+		subagentTasks, err := a.planSubagents(task)
+		if err != nil {
+			return "", fmt.Errorf("plan subagents: %w", err)
+		}
+
+		subagentResults := a.spawnParallel(subagentTasks)
+		allResults = a.aggregate(subagentResults)
 	}
-	log.Printf("[smart-agent] Planned %d subagent tasks", len(subagentTasks))
 
-	// Step 2: Spawn parallel subagent processes
-	log.Printf("\n[smart-agent] Step 2: Spawning parallel subagent processes")
-	subagentResults := a.spawnParallelSubagents(subagentTasks)
-	log.Printf("[smart-agent] Completed %d subagents", len(subagentResults))
-
-	// Step 3: Aggregate results
-	log.Printf("\n[smart-agent] Step 3: Aggregating results")
-	allResults := a.aggregateResults(subagentResults)
-
-	// Step 4: Main agent analysis
-	log.Printf("\n[smart-agent] Step 4: Main agent analysis")
+	// Final analysis
 	analysis, err := a.analyze(task, allResults)
 	if err != nil {
 		return "", fmt.Errorf("analyze: %w", err)
 	}
 
 	duration := time.Since(start)
-	log.Printf("\n[smart-agent] ═══════════════════════════════════════")
-	log.Printf("[smart-agent] ║ COMPLETE")
-	log.Printf("[smart-agent] ║ duration: %v", duration)
-	log.Printf("[smart-agent] ║ subagents: %d", len(subagentTasks))
-	log.Printf("[smart-agent] ═══════════════════════════════════════")
+	log.Printf("\n[agent] ═══════════════════════════════════════")
+	log.Printf("[agent] ║ COMPLETE in %v", duration)
+	log.Printf("[agent] ═══════════════════════════════════════")
 
 	return analysis, nil
 }
 
-// planSubagents uses LLM to plan subagent tasks
+// executeDirectly runs tools without sub-spawning (for subagents)
+func (a *SmartAgent) executeDirectly(task string) map[string]string {
+	toolsList := a.buildTools()
+	results := make(map[string]string)
+
+	prompt := fmt.Sprintf(`Complete this task: %s
+
+Use the available tools to gather information.
+Return your findings when done.`, task)
+
+	// Single LLM call with tool execution
+	resp, err := a.llm.Chat(llm.ChatRequest{
+		Messages: []llm.Message{
+			{Role: "user", Content: prompt},
+		},
+		Tools:     toolsList,
+		MaxTokens: maxSubagentTokens,
+		Model:     a.cfg.LLM.Model,
+	})
+	if err != nil {
+		results["error"] = err.Error()
+		return results
+	}
+
+	// Execute tool calls
+	for _, tc := range resp.ToolCalls {
+		var args map[string]any
+		json.Unmarshal([]byte(tc.Function.Arguments), &args)
+		result, err := a.executeTool(tc.Function.Name, args)
+		if err != nil {
+			results[tc.Function.Name] = fmt.Sprintf("Error: %v", err)
+		} else {
+			results[tc.Function.Name] = result
+		}
+	}
+
+	// If no tool calls, use response as result
+	if len(resp.ToolCalls) == 0 {
+		results["analysis"] = resp.Content
+	}
+
+	return results
+}
+
+// planSubagents uses LLM to break task into parallel subtasks
 func (a *SmartAgent) planSubagents(task string) ([]Subagent, error) {
-	prompt := fmt.Sprintf(`I need to complete this task: %s
+	prompt := fmt.Sprintf(`Break this task into 2-3 parallel subtasks.
+Return ONLY a JSON array, no explanations.
 
-Break this into 2-4 parallel subagent tasks.
-Each subagent should handle a specific aspect of the task.
+Task: %s
 
-Return JSON array of subagent tasks:
-[
-  {"id": "1", "task": "Search for OAuth2 related files"},
-  {"id": "2", "task": "Analyze token storage security"},
-  {"id": "3", "task": "Check CSRF protection"}
-]
-
-Return ONLY the JSON array, no other text.`, task)
+Format:
+[{"id":"1","task":"subtask description"},{"id":"2","task":"subtask description"}]`, task)
 
 	resp, err := a.llm.Chat(llm.ChatRequest{
 		Messages: []llm.Message{
 			{Role: "user", Content: prompt},
 		},
-		MaxTokens: 500,
+		MaxTokens: 300,
 		Model:     a.cfg.LLM.Model,
 	})
-
 	if err != nil {
-		return nil, err
-	}
-
-	// Parse JSON response
-	var subagentTasks []Subagent
-	if err := json.Unmarshal([]byte(resp.Content), &subagentTasks); err != nil {
 		// Fallback to single task
-		return []Subagent{
-			{ID: "1", Task: task},
-		}, nil
+		return []Subagent{{ID: "1", Task: task}}, nil
 	}
 
-	return subagentTasks, nil
+	var tasks []Subagent
+	if err := json.Unmarshal([]byte(resp.Content), &tasks); err != nil {
+		return []Subagent{{ID: "1", Task: task}}, nil
+	}
+
+	// Limit to maxSubagents
+	if len(tasks) > maxSubagents {
+		tasks = tasks[:maxSubagents]
+	}
+
+	return tasks, nil
 }
 
-// spawnParallelSubagents spawns independent processes for each subagent
-func (a *SmartAgent) spawnParallelSubagents(tasks []Subagent) []Subagent {
+// spawnParallel spawns subagent processes in parallel with limits
+func (a *SmartAgent) spawnParallel(tasks []Subagent) []Subagent {
 	var wg sync.WaitGroup
 	results := make([]Subagent, len(tasks))
+
+	// Semaphore to limit concurrency
+	sem := make(chan struct{}, maxSubagents)
 
 	for i, task := range tasks {
 		wg.Add(1)
 		go func(idx int, t Subagent) {
 			defer wg.Done()
-			results[idx] = a.spawnSubagentProcess(t)
+			sem <- struct{}{}        // acquire
+			defer func() { <-sem }() // release
+			results[idx] = a.spawnSubagent(t)
 		}(i, task)
 	}
 
@@ -157,139 +205,106 @@ func (a *SmartAgent) spawnParallelSubagents(tasks []Subagent) []Subagent {
 	return results
 }
 
-// spawnSubagentProcess spawns an independent process for a subagent
-func (a *SmartAgent) spawnSubagentProcess(task Subagent) Subagent {
+// spawnSubagent spawns a single subagent process
+func (a *SmartAgent) spawnSubagent(task Subagent) Subagent {
 	start := time.Now()
+	log.Printf("[subagent-%s] Starting: %s", task.ID, truncate(task.Task, 50))
 
-	log.Printf("[subagent-%s] Spawning process: %s", task.ID, task.Task)
-
-	// Create temporary config for subagent
-	configPath := fmt.Sprintf("/tmp/ptahcortex-subagent-%s.yaml", task.ID)
-	if err := a.createSubagentConfig(configPath, task); err != nil {
+	// Create temp config with --subagent flag (no nested spawning)
+	configPath := fmt.Sprintf("/tmp/ptahcortex-sub-%s.yaml", task.ID)
+	if err := a.writeConfig(configPath, task); err != nil {
 		task.Error = err
 		task.Duration = time.Since(start)
-		log.Printf("[subagent-%s] Error creating config: %v", task.ID, err)
 		return task
 	}
 	defer os.Remove(configPath)
 
-	// Spawn independent process
-	cmd := exec.Command("/usr/local/bin/ptahcortex",
+	// Spawn with timeout and --subagent flag
+	ctx, cancel := context.WithTimeout(context.Background(), subagentTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "/usr/local/bin/ptahcortex",
 		"--config", configPath,
-		"--smart",
+		"--subagent", // key: prevents recursive spawning
 		"--task", task.Task,
 	)
 
-	// Capture output
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		task.Error = err
-		task.Output = string(output)
-		task.Duration = time.Since(start)
-		log.Printf("[subagent-%s] Error: %v", task.ID, err)
-		return task
-	}
-
 	task.Output = string(output)
 	task.Duration = time.Since(start)
 
-	log.Printf("[subagent-%s] Completed in %v", task.ID, task.Duration)
+	if err != nil {
+		task.Error = err
+		log.Printf("[subagent-%s] Failed: %v (%v)", task.ID, err, task.Duration)
+	} else {
+		log.Printf("[subagent-%s] Done in %v", task.ID, task.Duration)
+	}
+
 	return task
 }
 
-// createSubagentConfig creates a temporary config for a subagent
-func (a *SmartAgent) createSubagentConfig(configPath string, task Subagent) error {
-	// Escape task description for YAML
-	escapedTask := strings.ReplaceAll(task.Task, "'", "''")
-	escapedTask = strings.ReplaceAll(escapedTask, "\n", " ")
-	
-	config := fmt.Sprintf(`name: subagent-%s
-description: "Subagent for: %s"
+// writeConfig creates a temp config for a subagent
+func (a *SmartAgent) writeConfig(path string, task Subagent) error {
+	escaped := strings.ReplaceAll(task.Task, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, "\n", " ")
 
+	cfg := fmt.Sprintf(`name: subagent-%s
+description: "Subagent: %s"
 llm:
   provider: openai
   model: mimo-v2.5
   base_url: https://token-plan-sgp.xiaomimimo.com
   api_key: tp-s7emr8e5k8enrm5jnz2gs82d3hvhoq22vvt0sw110sipuhfm
-  max_tokens: 4096
-
+  max_tokens: %d
 tools:
-  max_parallel: 3
-  timeout: 30s
-
+  max_parallel: 2
+  timeout: 20s
 agent:
-  max_iterations: 3
-  max_tokens_per_run: 20000
-`, task.ID, escapedTask)
+  max_iterations: 2
+  max_tokens_per_run: 10000
+`, task.ID, escaped, maxSubagentTokens)
 
-	return os.WriteFile(configPath, []byte(config), 0644)
+	return os.WriteFile(path, []byte(cfg), 0644)
 }
 
-// aggregateResults aggregates results from all subagents
-func (a *SmartAgent) aggregateResults(subagents []Subagent) map[string]string {
-	allResults := make(map[string]string)
-
+// aggregate combines results from all subagents
+func (a *SmartAgent) aggregate(subagents []Subagent) map[string]string {
+	results := make(map[string]string)
 	for _, sub := range subagents {
+		key := fmt.Sprintf("subagent-%s", sub.ID)
 		if sub.Error != nil {
-			allResults[fmt.Sprintf("subagent-%s-error", sub.ID)] = sub.Error.Error()
-			continue
+			results[key+"-error"] = sub.Error.Error()
+		} else {
+			results[key] = sub.Output
 		}
-
-		// Parse output for findings
-		allResults[fmt.Sprintf("subagent-%s-output", sub.ID)] = sub.Output
 	}
-
-	return allResults
+	return results
 }
 
-// analyze uses LLM to analyze all results
+// analyze uses LLM to produce final analysis
 func (a *SmartAgent) analyze(task string, results map[string]string) (string, error) {
-	// Build context from all results
-	var context strings.Builder
-	for key, result := range results {
-		// Truncate long results
-		truncated := result
-		if len(truncated) > 500 {
-			truncated = truncated[:500] + "..."
+	var ctx strings.Builder
+	for k, v := range results {
+		if len(v) > 800 {
+			v = v[:800] + "..."
 		}
-		context.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", key, truncated))
+		ctx.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", k, v))
 	}
 
-	prompt := fmt.Sprintf(`You are a senior security auditor. Analyze the following code for security vulnerabilities.
+	prompt := fmt.Sprintf(`You are a senior security auditor. Analyze these results and provide a comprehensive report.
 
 TASK: %s
 
-SUBAGENT RESULTS:
+RESULTS:
 %s
 
-CRITICAL SECURITY CHECKS:
-1. JWT/Token Security:
-   - Token in URL query parameters (Critical)
-   - Weak/default JWT secrets (Critical)
-   - No algorithm restriction (Critical)
-   - Token storage in localStorage (High)
-   - No token revocation (High)
-
-2. OAuth2 Security:
-   - CSRF via missing state validation (High)
-   - Open redirect via unvalidated redirect_uri (High)
-   - Insecure token storage (High)
-
-3. CORS/Headers:
-   - CORS reflects any origin with credentials (Critical)
-   - Missing security headers (Medium)
-
-4. Session Management:
-   - Session fixation (High)
-   - Insecure session storage (High)
-
-For EACH issue found:
-- File path and exact line numbers
-- Severity rating (Critical/High/Medium/Low)
-- Attack vector explanation
+For each finding include:
+- File path and line numbers
+- Severity (Critical/High/Medium/Low)
+- Attack vector
 - Code patch to fix
 
-Be thorough. Find ALL critical vulnerabilities.`, task, context.String())
+Be thorough and find ALL critical vulnerabilities.`, task, ctx.String())
 
 	resp, err := a.llm.Chat(llm.ChatRequest{
 		Messages: []llm.Message{
@@ -298,7 +313,6 @@ Be thorough. Find ALL critical vulnerabilities.`, task, context.String())
 		MaxTokens: a.cfg.LLM.MaxTokens,
 		Model:     a.cfg.LLM.Model,
 	})
-
 	if err != nil {
 		return "", err
 	}
@@ -306,4 +320,94 @@ Be thorough. Find ALL critical vulnerabilities.`, task, context.String())
 	return resp.Content, nil
 }
 
-// truncate is defined in agent.go
+// buildTools returns available tools
+func (a *SmartAgent) buildTools() []llm.ToolDefinition {
+	tools := []llm.ToolDefinition{
+		{Type: "function", Function: llm.ToolFunction{
+			Name: "read_file", Description: "Read file contents",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"path": map[string]any{"type": "string", "description": "File path"}},
+				"required": []string{"path"},
+			},
+		}},
+		{Type: "function", Function: llm.ToolFunction{
+			Name: "exec", Description: "Execute shell command",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"command": map[string]any{"type": "string", "description": "Command"}},
+				"required": []string{"command"},
+			},
+		}},
+		{Type: "function", Function: llm.ToolFunction{
+			Name: "list_files", Description: "List files in directory",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"path": map[string]any{"type": "string", "description": "Directory path"}},
+			},
+		}},
+	}
+
+	if a.useLexa {
+		tools = append(tools,
+			llm.ToolDefinition{Type: "function", Function: llm.ToolFunction{
+				Name: "search", Description: "Search code patterns (Lexa)",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{"query": map[string]any{"type": "string"}},
+					"required": []string{"query"},
+				},
+			}},
+			llm.ToolDefinition{Type: "function", Function: llm.ToolFunction{
+				Name: "outline", Description: "Get file structure (Lexa)",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{"path": map[string]any{"type": "string"}},
+					"required": []string{"path"},
+				},
+			}},
+		)
+	}
+
+	return tools
+}
+
+// executeTool runs a single tool
+func (a *SmartAgent) executeTool(name string, args map[string]any) (string, error) {
+	switch name {
+	case "read_file":
+		p, _ := args["path"].(string)
+		return a.basic.ReadFile(p)
+	case "exec":
+		c, _ := args["command"].(string)
+		return a.basic.Exec(c)
+	case "list_files":
+		p, _ := args["path"].(string)
+		return a.basic.ListFiles(p)
+	case "search":
+		if a.useLexa {
+			q, _ := args["query"].(string)
+			r, err := a.mcp.CallTool("text_search", map[string]any{"query": q})
+			if err != nil {
+				return "", err
+			}
+			return r.Content, nil
+		}
+		q, _ := args["query"].(string)
+		return a.basic.Exec(fmt.Sprintf("grep -r '%s' . 2>/dev/null | head -20", q))
+	case "outline":
+		if a.useLexa {
+			p, _ := args["path"].(string)
+			r, err := a.mcp.CallTool("outline", map[string]any{"path": p})
+			if err != nil {
+				return "", err
+			}
+			return r.Content, nil
+		}
+		return "", fmt.Errorf("outline requires Lexa")
+	default:
+		return "", fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+// truncate is in agent.go
