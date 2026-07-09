@@ -15,6 +15,7 @@ import (
 	"github.com/rhythmwave/ptahcortex/internal/mcp"
 	"github.com/rhythmwave/ptahcortex/internal/otel"
 	"github.com/rhythmwave/ptahcortex/internal/tools"
+	"github.com/rhythmwave/ptahcortex/internal/ui"
 )
 
 // InteractiveAgent maintains context across multiple user inputs
@@ -53,11 +54,8 @@ func NewInteractiveAgent(cfg *config.Config, provider llm.Provider, mcpManager *
 func (a *InteractiveAgent) RunInteractive() error {
 	scanner := bufio.NewScanner(os.Stdin)
 	
-	fmt.Println("═══════════════════════════════════════════")
-	fmt.Println("  Ptahcortex Interactive Mode")
-	fmt.Println("  Type 'exit' or 'quit' to end session")
-	fmt.Println("═══════════════════════════════════════════")
-	fmt.Println()
+	// Show banner
+	ui.Banner(ui.GetVersion(), a.cfg.LLM.Model, "high")
 	
 	// Initialize with system prompt
 	a.messages = append(a.messages, llm.Message{
@@ -74,7 +72,7 @@ When the user asks you to:
 	})
 	
 	for {
-		fmt.Print("You: ")
+		fmt.Print(ui.Prompt())
 		if !scanner.Scan() {
 			break
 		}
@@ -85,21 +83,27 @@ When the user asks you to:
 		}
 		
 		if input == "exit" || input == "quit" {
-			fmt.Println("Session ended.")
+			ui.Success("Session ended.")
 			break
 		}
 		
 		a.turnCount++
 		log.Printf("\n[interactive] Turn %d: %s", a.turnCount, input)
 		
+		// Show thinking indicator
+		ui.Thinking(0, "analyzing request")
+		
 		// Process the user input
 		response, err := a.processTurn(input)
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
+			ui.Error(fmt.Sprintf("%v", err))
 			continue
 		}
 		
-		fmt.Printf("\nAgent: %s\n\n", response)
+		// Show response
+		fmt.Println()
+		fmt.Println(response)
+		fmt.Println()
 	}
 	
 	return nil
